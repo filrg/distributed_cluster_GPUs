@@ -52,7 +52,7 @@ L4        = GPUType("L4",         p_idle=15.0, p_peak=(72.0),  p_sleep=8.0,  alp
 Công thức (mỗi **GPU**):
 
 $$
-P_{\text{gpu}}(f) \;=\; \alpha_p \, f^3 \;+\; \beta_p \, f \;+\; \gamma_p \quad\text{(W/GPU)}
+P_{\text{gpu}}(f) = \alpha_p f^3 + \beta_p f + \gamma_p \quad\text{(W/GPU)}
 $$
 
 * `f` là **tần số chuẩn hoá** (ví dụ các mức `freq_levels = [0.5, 0.8, 1.0]`). Nếu dùng **GHz thực**, phải fit lại hệ số cho đúng đơn vị.
@@ -75,7 +75,9 @@ $$
 
 Công thức:
 
-$$T(n,f) \;=\; \alpha_t \;+\; \frac{\beta_t}{f} \;+\; \gamma_t \, n \quad\text{(s / unit)}$$
+$$
+T(n,f) = \alpha_t + \frac{\beta_t}{f} + \gamma_t n \quad\text{(s / unit)}
+$$
 
 * `unit` là **đơn vị công việc** người dùng định nghĩa trong simulator (ví dụ “một step training”, “một micro-batch”, hay “một batch inference cỡ b”).
 * `α_t` (s/unit) — overhead cố định (IO, setup).
@@ -86,14 +88,14 @@ $$T(n,f) \;=\; \alpha_t \;+\; \frac{\beta_t}{f} \;+\; \gamma_t \, n \quad\text{(
 Với công thức như trên, tăng `n` **làm tăng** $T(n,f)$ (vì $+\gamma_t n$). Nếu muốn **scale-out có lợi**, dùng biến thể:
 
 $$
-T(n,f) \;=\; \alpha_t \;+\; \frac{\beta_t}{f \, n^{\eta}} \;+\; \gamma_t \, n,\quad 0<\eta\le1,
+T(n,f) = \alpha_t + \frac{\beta_t}{f n^{\eta}} + \gamma_t n,\quad 0<\eta\le1,
 $$
 
-hoặc đơn giản thay $\beta_t/f$ thành $\beta_t/(f\cdot n)$ rồi fit lại. Nếu không chỉnh, tối ưu sẽ luôn nghiêng về **n=1** (phản thực tế).
+hoặc đơn giản thay $\beta_t/f$ thành $\beta_t/(f\cdot n)$ rồi fit lại. Nếu không chỉnh, tối ưu sẽ luôn nghiêng về **n=1** (phi thực tế).
 
 **Gợi ý fit:**
 
-* Cố định `unit` rõ ràng (vd. “1 micro-batch 1k tokens”).
+* Cố định `unit` rõ ràng (vd. "1 micro-batch 1k tokens").
 * Đo thời gian ở nhiều mức f và n → hồi quy phi tuyến theo gợi ý trên.
 
 ### Cách simulator dùng các hệ số
@@ -111,8 +113,7 @@ Các hệ số **không phụ thuộc** `GPUType.p_idle/p_sleep` — các số n
 
 * `f`
 
-  * **Khuyên dùng chuẩn hoá**: $f\in(0,1]$, với 1.0 = mức “nominal”.
-  * Nếu dùng GHz thực, ghi rõ và **fit lại** mọi hệ số.
+  * **Khuyên dùng với giá trị chuẩn hoá**: $f\in(0,1]$, với 1.0 = mức “nominal”.
 * `P` (W), `T` (s/unit).
 * Ràng buộc:
 
@@ -147,9 +148,9 @@ Simulator sẽ sinh **sự kiện đến** theo cấu hình này và đẩy vào
 	* `"poisson"`: tốc độ đến **không đổi** $\lambda$. Khoảng cách giữa hai arrival i.i.d. **mũ** ⇒ CV=1.
 	* `"sinusoid"`: tốc độ đến **thay đổi theo thời gian**:
 
-  $$
-  \lambda(t)=\max\big(0,\ \text{rate}\cdot[1 + \text{amp}\cdot \sin(2\pi\, t/\text{period})]\big)
-  $$
+$$
+\lambda(t)=\max\big(0,\ \text{rate}\cdot[1 + \text{amp}\cdot \sin(2\pi\, t/\text{period})]\big)
+$$
 
   Dùng **thinning** để sinh arrival; biên dao động được kiểm soát bởi `amp`.
 
@@ -186,9 +187,9 @@ Simulator sẽ sinh **sự kiện đến** theo cấu hình này và đẩy vào
 
 Giả sử muốn inference **không quá tải**:
 
-* Mỗi GPU ở `f=1` xử lý được \~$\mu$ **unit/s** (từ `TrainLatencyCoeffs`), một job inference tiêu tốn $u$ unit trung bình.
+* Mỗi GPU ở `f=1` xử lý được khoảng $\mu$ **unit/s** (từ `TrainLatencyCoeffs`), một job inference tiêu tốn $u$ unit trung bình.
 * Một DC có $G$ GPU, phân bổ trung bình $g$ GPU cho mỗi request inference.
-  ⇒ Năng lực \~ $\text{cap} \approx \dfrac{G}{g}\cdot\dfrac{\mu}{u}$ **req/s**.
+  ⇒ Năng lực gần bằng $\text{cap} \approx \dfrac{G}{g}\cdot\dfrac{\mu}{u}$ **req/s**.
 * Chọn `inf_rate` < **tổng** `cap` của các DC *mà router sẽ chọn tới*; nếu dùng sinusoid, đảm bảo **đỉnh** $\text{rate}(1+\text{amp})$ vẫn ≤ **tổng cap** hoặc chấp nhận hàng đợi.
 
 ### Mẫu cấu hình
@@ -220,7 +221,7 @@ python run_sim_paper.py \
   --duration 1200
 ```
 
-# Cách chạy
+# Cách chạy với các thuật toán khác nhau
 
 ## baseline (không hãm công suất)
 ```commandline
