@@ -1,0 +1,334 @@
+import csv, heapq, itertools, random
+from typing import Dict, List, Tuple
+from .models import Job, DataCenter
+from .arrivals import ArrivalConfig
+from .policy import PolicyConfig, select_gpus_and_set_freq
+from .coeffs import TrainPowerCoeffs, TrainLatencyCoeffs
+from .latency_paper import step_time_s
+from .policy_paper import energy_tuple
+from .network import Ingress, Graph
+from .router import RouterPolicy, select_dc
+from .energy_paper import gpu_power_w
+
+Event = Tuple[float, int, str, dict]
+
+class MultiIngressPaperSimulator:
+    """
+    - Mỗi ingress có arrival riêng (inference & training).
+    - Khi job đến ingress: route -> DC, cộng delay WAN rồi mới vào hàng đợi DC.
+    - Data transfer time (đơn giản): t_net = Lnet + data_GB / bottleneck_Gbps (nếu biết).
+    """
+    def __init__(self,
+                 ingresses: Dict[str, Ingress],
+                 dcs: Dict[str, DataCenter],
+                 graph: Graph,
+                 arrival_inf: ArrivalConfig,
+                 arrival_train: ArrivalConfig,
+                 router_policy: RouterPolicy,
+                 coeffs_map: Dict[Tuple[str, str], Tuple[TrainPowerCoeffs, TrainLatencyCoeffs]],
+                 carbon_intensity: Dict[str, float] = None,
+                 policy: PolicyConfig = None,
+                 sim_duration: float = 3600.0,
+                 log_interval: float = 10.0,
+                 rng_seed: int = 42,
+                 algo: str = "baseline",
+                 power_cap: float = 0.0,
+                 control_interval: float = 5.0):
+        self.now = 0.0
+        self.end_time = sim_duration
+        self.event_q: List[Event] = []
+        self.seq = itertools.count()
+        self.ingresses = ingresses
+        self.dcs = dcs
+        self.graph = graph
+        self.arr_inf = arrival_inf
+        self.arr_trn = arrival_train
+        self.router_policy = router_policy
+        self.coeffs_map = coeffs_map
+        self.carbon = carbon_intensity or {}
+        self.policy = policy or PolicyConfig(name="energy_aware")
+        random.seed(rng_seed)
+        self.jid_counter = itertools.count(1)
+
+        self.cluster_log_path = "cluster_log.csv"
+        self.job_log_path = "job_log.csv"
+
+        self.algo = algo
+        self.power_cap = power_cap
+        self.control_interval = control_interval
+
+        # schedule arrivals per ingress
+        for ing in self.ingresses.values():
+            self._schedule(self.now + self.arr_inf.next_interarrival(self.now), 'arrival_inf', {'ing': ing.name})
+            self._schedule(self.now + self.arr_trn.next_interarrival(self.now), 'arrival_trn', {'ing': ing.name})
+        self._schedule(self.now + log_interval, 'log', {'interval': log_interval})
+
+    # --- event helpers ---
+    def _schedule(self, t: float, etype: str, payload: dict):
+        if t == float('inf') or t > self.end_time + 1e-9:
+            return
+        heapq.heappush(self.event_q, (t, next(self.seq), etype, payload))
+
+    def _pop(self):
+        return heapq.heappop(self.event_q) if self.event_q else None
+
+    def _estimate_dc_power(self, dc: DataCenter, f: float) -> float:
+        # Active (paper model)
+        p_active = 0.0
+        for job, g in dc.running_jobs.values():
+            pC, tC = self.coeffs_map[(dc.name, job.jtype)]
+            p_active += g * gpu_power_w(f, pC)
+        # Idle
+        idle = dc.total_gpus - dc.busy_gpus
+        gt = dc.gpu_type
+        p_idle = idle * (gt.p_sleep if dc.power_gating else gt.p_idle)
+        return p_active + p_idle
+
+    def _cap_uniform(self, deficit: float):
+        """Giảm f theo bước rời rạc, mỗi bước chọn DC có ∆P lớn nhất."""
+        iter_guard = 10000
+        while deficit > 1e-6 and iter_guard > 0:
+            iter_guard -= 1
+            best_dc, best_dp, best_next_f = None, 0.0, None
+            for dc in self.dcs.values():
+                levels = dc.freq_levels
+                # snap index
+                try:
+                    idx = levels.index(dc.current_freq)
+                except ValueError:
+                    idx = min(range(len(levels)), key=lambda i: abs(levels[i] - dc.current_freq))
+                if idx == 0:
+                    continue
+                f_now, f_lo = levels[idx], levels[idx - 1]
+                p_now = self._estimate_dc_power(dc, f_now)
+                p_lo = self._estimate_dc_power(dc, f_lo)
+                dp = p_now - p_lo
+                if dp > best_dp + 1e-9:
+                    best_dc, best_dp, best_next_f = dc, dp, f_lo
+            if not best_dc or best_dp <= 1e-9:
+                break
+            best_dc.current_freq = best_next_f
+            deficit -= best_dp
+
+    def _control(self):
+        if self.algo not in ("cap_uniform", "cap_greedy"):
+            return
+        if self.power_cap <= 0:
+            return
+
+        # Ước lượng tổng P hiện tại bằng mô hình paper (đã có _estimate_dc_power)
+        totalP = sum(self._estimate_dc_power(dc, dc.current_freq) for dc in self.dcs.values())
+        if totalP <= self.power_cap:
+            return
+
+        deficit = totalP - self.power_cap
+
+        if self.algo == "cap_uniform":
+            # giữ nguyên như version cũ: hạ đồng loạt theo DC, mỗi bước chọn ∆P lớn nhất
+            return self._cap_uniform(deficit)
+
+        # ---- cap_greedy: chọn 'atoms' per-job theo aggregate ----
+        from .freq_load_agg import TaskState, aggregate_with_atoms
+        tasks = []
+        for dc in self.dcs.values():
+            levels = dc.freq_levels
+            for job, g in dc.running_jobs.values():
+                pC, tC = self.coeffs_map[(dc.name, job.jtype)]
+                cur_f = getattr(job, "f_used", 0.0) or dc.current_freq
+                tasks.append(TaskState(job_id=job.jid, dc_name=dc.name, n=g, f=cur_f,
+                                       freq_levels=levels, p_coeffs=pC, t_coeffs=tC))
+        _, down_atoms = aggregate_with_atoms(tasks)
+
+        for atom in down_atoms:
+            if deficit <= 1e-6:
+                break
+            dc = self.dcs[atom.dc_name]
+            tup = dc.running_jobs.get(atom.job_id)
+            if not tup:
+                continue
+            job, g = tup
+            # ÁP DỤNG BƯỚC: reschedule job với f_to
+            self._reschedule_job(dc, job, g, atom.f_to)
+            deficit -= atom.dP  # xấp xỉ; nếu muốn chính xác, ước lượng lại ∆P sau khi đổi f
+
+    def _job_rate_units_per_s(self, dc, job, gpus, f):
+        # 1 unit công việc mất T_unit(n,f) giây ⇒ tốc độ (units/s) = 1 / T_unit
+        _, tC = self.coeffs_map[(dc.name, job.jtype)]
+        from .latency_paper import step_time_s
+        T_unit = step_time_s(gpus, f, tC)
+        return 1.0 / max(T_unit, 1e-9)
+
+    def _advance_progress_to_now(self, dc, job, gpus):
+        # cộng dồn units_done theo f_used hiện tại
+        rate = self._job_rate_units_per_s(dc, job, gpus, job.f_used or dc.current_freq)
+        dt = max(0.0, self.now - job.last_update)
+        job.units_done = min(job.units_total, job.units_done + rate * dt)
+        job.last_update = self.now
+
+    def _reschedule_job(self, dc, job, gpus, new_f):
+        # cập nhật tiến độ -> đổi f -> đặt lại job_finish
+        self._advance_progress_to_now(dc, job, gpus)
+        job.f_used = new_f
+        units_left = max(0.0, job.units_total - job.units_done)
+        rate_new = self._job_rate_units_per_s(dc, job, gpus, new_f)
+        finish_in = units_left / max(rate_new, 1e-9)
+        job.ev_gen += 1
+        self._schedule(self.now + finish_in, 'job_finish', {'dc': dc.name, 'jid': job.jid, 'gen': job.ev_gen})
+
+    # --- run loop ---
+    def run(self):
+        with open(self.cluster_log_path, 'w', newline='') as f:
+            csv.writer(f).writerow(["time_s","dc","freq","busy","free","run_total","run_inf","run_train","q_inf","q_train","power_W","energy_kJ"])
+        with open(self.job_log_path, 'w', newline='') as f:
+            csv.writer(f).writerow(["jid","ingress","type","size","dc","f_used","n_gpus",
+                                    "net_lat_s","start_s","finish_s","latency_s","T_pred","P_pred","E_pred"])
+
+        while self.event_q:
+            ev = self._pop()
+            if ev is None: break
+            t,_,etype,payload = ev
+            if t > self.end_time: break
+
+            for dc in self.dcs.values():
+                dc.accrue_energy(t)
+
+            self.now = t
+            if etype == 'arrival_inf':
+                self._handle_ingress_arrival('inference', payload['ing'])
+            elif etype == 'arrival_trn':
+                self._handle_ingress_arrival('training', payload['ing'])
+            elif etype == 'xfer_done':
+                self._handle_transfer_done(payload)
+            elif etype == 'job_finish':
+                # self._handle_job_finish(payload['dc'], payload['jid'])
+                dc = self.dcs[payload['dc']]
+                tup = dc.running_jobs.get(payload['jid'])
+                if not tup:
+                    continue
+                job, g = tup
+                if payload.get('gen') != job.ev_gen:
+                    continue  # event cũ, bỏ qua
+                self._handle_job_finish(payload['dc'], payload['jid'])
+            elif etype == 'log':
+                self._control()
+                self._handle_log(payload['interval'])
+            else:
+                raise RuntimeError(f"Unknown event {etype}")
+
+        for dc in self.dcs.values():
+            dc.accrue_energy(self.end_time)
+
+    # --- arrivals at ingress ---
+    def _handle_ingress_arrival(self, jtype: str, ing_name: str):
+        ing = self.ingresses[ing_name]
+        jid = next(self.jid_counter)
+        size = self._sample_job_size(jtype)
+        job = Job(jid=jid, jtype=jtype, size=size, arrival_time=self.now, dc_name=None)
+        # route
+        dc_name, Lnet, path, score = select_dc(ing, jtype, self.dcs, self.coeffs_map,
+                                               self.graph, self.carbon, self.router_policy)
+        # simple transfer time model
+        data_gb = 0.05 if jtype == 'inference' else 5.0
+        # bottleneck not returned here to keep simple; you can extend Graph to return it.
+        transfer_s = Lnet  # + data_gb / max(1e-6, bottleneck)  # bật khi có capacity
+        # schedule transfer completion
+        self._schedule(self.now + transfer_s, 'xfer_done',
+                       {'ing': ing_name, 'dc': dc_name, 'jid': jid, 'job': job, 'net_lat_s': Lnet})
+
+        # schedule next arrival at this ingress
+        ia = (self.arr_inf if jtype=='inference' else self.arr_trn).next_interarrival(self.now)
+        self._schedule(self.now + ia,
+                       'arrival_inf' if jtype=='inference' else 'arrival_trn',
+                       {'ing': ing_name})
+
+    def _sample_job_size(self, jtype: str) -> float:
+        import math, random
+        if jtype == 'inference':
+            xm, alpha = 0.02, 2.5
+            u = max(1e-9, 1 - random.random())
+            return xm / (u ** (1/alpha))
+        mu, sigma = math.log(3.0), 0.6
+        return max(0.1, random.lognormvariate(mu, sigma))
+
+    # --- after WAN transfer ---
+    def _handle_transfer_done(self, payload: dict):
+        dc = self.dcs[payload['dc']]
+        job: Job = payload['job']
+        job.dc_name = dc.name
+        job.arrival_time = self.now  # coi như 'đến' DC lúc này
+        job.net_latency_s = payload['net_lat_s']
+        # enqueue or start
+        if dc.free_gpus > 0:
+            gpus = select_gpus_and_set_freq(dc, job, self.policy)
+            if gpus > 0:
+                return self._start_job(dc, job, gpus)
+        (dc.q_inf if job.jtype == 'inference' else dc.q_train).append(job)
+
+    def _start_job(self, dc: DataCenter, job: Job, gpus: int):
+        if gpus <= 0:
+            (dc.q_inf if job.jtype == 'inference' else dc.q_train).append(job)
+            return
+        dc.busy_gpus += gpus
+        dc.running_jobs[job.jid] = (job, gpus)
+        job.gpus_assigned = gpus
+        job.start_time = self.now
+
+        job.f_used = dc.current_freq
+        job.units_total = job.size
+        job.units_done = 0.0
+        job.last_update = self.now
+        job.ev_gen += 1
+
+        p_coeffs, t_coeffs = self.coeffs_map[(dc.name, job.jtype)]
+        T_unit = step_time_s(gpus, dc.current_freq, t_coeffs)
+
+        # service_time = job.size * T_unit
+        # self._schedule(self.now + service_time, 'job_finish', {'dc': dc.name, 'jid': job.jid})
+        self._schedule(self.now + job.size * T_unit, 'job_finish', {'dc': dc.name, 'jid': job.jid, 'gen': job.ev_gen})
+
+    def _handle_job_finish(self, dc_name: str, jid: int):
+        dc = self.dcs[dc_name]
+        tup = dc.running_jobs.pop(jid, None)
+        if not tup: return
+        job, g = tup
+        dc.busy_gpus = max(0, dc.busy_gpus - g)
+        job.finish_time = self.now
+
+        p_coeffs, t_coeffs = self.coeffs_map[(dc.name, job.jtype)]
+        T_pred, P_pred, E_pred = energy_tuple(g, dc.current_freq, p_coeffs, t_coeffs)
+        with open(self.job_log_path, 'a', newline='') as f:
+            csv.writer(f).writerow([
+                job.jid, job.dc_name, job.jtype, f"{job.size:.4f}", dc.name,
+                f"{dc.current_freq:.3f}", g, f"{getattr(job,'net_latency_s',0.0):.4f}",
+                f"{job.start_time:.6f}", f"{job.finish_time:.6f}",
+                f"{(job.finish_time - job.start_time):.6f}",
+                f"{T_pred:.6f}", f"{P_pred:.2f}", f"{E_pred:.2f}"
+            ])
+
+        # start next jobs (inference first)
+        while dc.free_gpus > 0:
+            nxt = None
+            if self.policy.inf_priority and dc.q_inf:
+                nxt = dc.q_inf.pop(0)
+            elif dc.q_train:
+                nxt = dc.q_train.pop(0)
+            if nxt is None: break
+            gpus = select_gpus_and_set_freq(dc, nxt, self.policy)
+            if gpus <= 0:
+                (dc.q_inf if nxt.jtype == 'inference' else dc.q_train).insert(0, nxt)
+                break
+            self._start_job(dc, nxt, gpus)
+
+    def _handle_log(self, interval: float):
+        with open(self.cluster_log_path, 'a', newline='') as f:
+            w = csv.writer(f)
+            for name, dc in self.dcs.items():
+                run_total = len(dc.running_jobs)
+                run_inf = sum(1 for j,_ in dc.running_jobs.values() if j.jtype == 'inference')
+                run_trn = run_total - run_inf
+                power_now = self._estimate_dc_power(dc, getattr(dc, "current_freq", 1.0))
+                w.writerow([f"{self.now:.3f}", name, f"{dc.current_freq:.2f}",
+                            dc.busy_gpus, dc.free_gpus, run_total, run_inf, run_trn,
+                            len(dc.q_inf), len(dc.q_train),
+                            f"{power_now:.2f}", f"{dc.energy_joules/1000.0:.4f}"])
+        self._schedule(self.now + interval, 'log', {'interval': interval})

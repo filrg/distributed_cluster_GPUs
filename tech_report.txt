@@ -1,0 +1,103 @@
+@techreport{NVIDIA_A100_Datasheet_2021,
+  title   = {NVIDIA A100 Tensor Core GPU Datasheet},
+  author  = {{NVIDIA Corporation}},
+  year    = {2021},
+  month   = {June},
+  url     = {https://images.nvidia.com/aem-dam/en-zz/Solutions/data-center/nvidia-a100-datasheet.pdf},
+  note    = {PCIe: 250/300 W TDP; SXM4: 400 W TDP.}
+}
+
+@techreport{NVIDIA_H100_PCIe_PB_2022,
+  title   = {NVIDIA H100 PCIe GPU — Product Brief (PB-11133-001)},
+  author  = {{NVIDIA Corporation}},
+  year    = {2022},
+  month   = {September},
+  url     = {https://www.nvidia.com/content/dam/en-zz/Solutions/gtcs22/data-center/h100/PB-11133-001_v01.pdf},
+  note    = {PCIe default/max TDP 350 W; power modes documented.}
+}
+
+@misc{NVIDIA_H100_Web_700W,
+  title   = {NVIDIA H100 Tensor Core GPU — Specifications},
+  author  = {{NVIDIA Corporation}},
+  year    = {2025},
+  url     = {https://www.nvidia.com/en-us/data-center/h100/},
+  note    = {SXM: up to 700 W (configurable); PCIe/NVL: 350–400 W (configurable).}
+}
+
+@techreport{NVIDIA_H100_NVL_PB_2024,
+  title   = {NVIDIA H100 NVL — Product Brief (PB-11773-001)},
+  author  = {{NVIDIA Corporation}},
+  year    = {2024},
+  month   = {March},
+  url     = {https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/h100/PB-11773-001_v01.pdf},
+  note    = {NVL (PCIe) operates up to 400 W TDP; tables list supported power levels.}
+}
+
+@techreport{NVIDIA_L4_PB_2023,
+  title   = {NVIDIA L4 GPU Accelerator — Product Brief (PB-11316-001)},
+  author  = {{NVIDIA Corporation}},
+  year    = {2023},
+  month   = {March},
+  url     = {https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/l4/PB-11316-001_v01.pdf},
+  note    = {Total board power: 72 W default/max; 40 W minimum.}
+}
+
+@techreport{NVIDIA_T4_Datasheet_2019,
+  title   = {NVIDIA T4 Tensor Core GPU — Datasheet},
+  author  = {{NVIDIA Corporation}},
+  year    = {2019},
+  month   = {March},
+  url     = {https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/tesla-t4/t4-tensor-core-datasheet-951643.pdf},
+  note    = {Low-profile PCIe; 70 W design.}
+}
+
+@techreport{NVIDIA_A10_Datasheet_2021,
+  title   = {NVIDIA A10 — Datasheet},
+  author  = {{NVIDIA Corporation}},
+  year    = {2021},
+  month   = {March},
+  url     = {https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a10/pdf/a10-datasheet.pdf},
+  note    = {Max TDP 150 W.}
+}
+
+@techreport{NVIDIA_A30_ProductBrief_2021,
+  title   = {NVIDIA A30 GPU Accelerator — Product Brief},
+  author  = {{NVIDIA Corporation}},
+  year    = {2021},
+  url     = {https://www.nvidia.com/content/dam/en-zz/Solutions/data-center/products/a30-gpu/pdf/a30-product-brief.pdf},
+  note    = {Dual-slot PCIe; maximum board power 165 W.}
+}
+
+@techreport{NVIDIA_A40_Datasheet_2022,
+  title   = {NVIDIA A40 — Datasheet},
+  author  = {{NVIDIA Corporation}},
+  year    = {2022},
+  month   = {March},
+  url     = {https://images.nvidia.com/content/Solutions/data-center/a40/nvidia-a40-datasheet.pdf},
+  note    = {Max power consumption 300 W.}
+}
+
+@techreport{NVIDIA_L40_Datasheet_2023,
+  title   = {NVIDIA L40 — Datasheet},
+  author  = {{NVIDIA Corporation}},
+  year    = {2023},
+  month   = {January},
+  url     = {https://www.nvidia.com/content/dam/en-zz/Solutions/design-visualization/support-guide/NVIDIA-L40-Datasheet-January-2023.pdf},
+  note    = {Max power consumption 300 W.}
+}
+
+@misc{NVIDIA_L40S_Specs_350W,
+  title   = {NVIDIA L40S GPU — Specifications},
+  author  = {{NVIDIA Corporation}},
+  year    = {2025},
+  url     = {https://www.nvidia.com/en-us/data-center/l40s/},
+  note    = {Max power consumption 350 W; full specs on page.}
+}
+
+@misc{NVIDIA_H200_Specs_2025,
+  title   = {NVIDIA H200 Tensor Core GPU — Quick Specs},
+  author  = {{NVIDIA Corporation}},
+  year    = {2025},
+  url     = {https://www.nvidia.com/en-us/data-center/h200/},
+  note    = {Max TDP up to 700 W (SXM) / up to 600 W (PCIe).}
+}

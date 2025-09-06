@@ -1,0 +1,238 @@
+# Cấu hình
+
+## Các loại GPU
+
+```python
+@dataclass
+class GPUType:
+    name: str        # ví dụ: "A100-SXM4", "H100-PCIe"
+    p_idle: float    # W — công suất 1 GPU khi ở trạng thái rỗi (P0/P8 tuỳ cấu hình)
+    p_peak: float    # W — “đỉnh” mà mô hình baseline dùng cho phần động
+    p_sleep: float   # W — công suất khi GPU bị gate/ngủ (power-gating), không nhận job
+    alpha: float     # hệ số mũ cho DVFS trong mô hình baseline (P ~ f^alpha)
+```
+
+* **`name`**
+  Ghi rõ **biến thể phần cứng** (SXM/PCIe, dung lượng HBM), vì công suất khác nhau. Ví dụ: `"A100-SXM4"`, `"H100-PCIe"`. Đừng ghi chung chung rồi kỳ vọng độ chính xác.
+
+* **`p_idle` (W)**
+  Công suất **một GPU** đang bật nhưng **không chạy** (no kernels). Trong baseline, khi GPU “bận” ta **cộng thêm** thành phần động, nên `p_idle` là nền tảng luôn tồn tại.
+  Note:
+
+  * Phụ thuộc driver/firmware, ECC, MIG, và “persistence mode”.
+  * Không có con số hãng công bố chuẩn.
+
+* **`p_peak` (W)**
+  Trong **mô hình baseline** (file `simcore/energy.py`), công suất khi GPU hoạt động ở tần số chuẩn được tính:
+
+  ```
+  P_active ≈ p_idle + p_peak * (f ** alpha)
+  ```
+
+  Ở đây `p_peak` là **biên độ phần động**, không nhất thiết đúng bằng TDP/TBP trên datasheet.
+
+* **`p_sleep` (W)**
+  Công suất khi **power-gating** (DC có `power_gating=True`), tức “tắt” một phần phần cứng/đưa về P8 sâu. Dùng để mô phỏng tiết kiệm khi dồn tải và tắt bớt GPU.
+
+* **`alpha`**
+  Hệ số mũ cho DVFS trong baseline. Giá trị 2–3.5 thường hợp lý; 3.0 là mặc định.
+
+**Ví dụ cấu hình**
+
+```python
+A100_SXM  = GPUType("A100-SXM4",  p_idle=50.0, p_peak=(400.0), p_sleep=30.0, alpha=3.0)
+H100_PCIe = GPUType("H100-PCIe",  p_idle=45.0, p_peak=(350.0), p_sleep=28.0, alpha=3.0)
+L4        = GPUType("L4",         p_idle=15.0, p_peak=(72.0),  p_sleep=8.0,  alpha=3.0)
+```
+
+## Profile tiêu thụ công suất và thời gian
+
+### `TrainPowerCoeffs(α_p, β_p, γ_p)` — mô hình công suất theo tần số
+
+Công thức (mỗi **GPU**):
+
+$$
+P_{\text{gpu}}(f) \;=\; \alpha_p \, f^3 \;+\; \beta_p \, f \;+\; \gamma_p \quad\text{(W/GPU)}
+$$
+
+* `f` là **tần số chuẩn hoá** (ví dụ các mức `freq_levels = [0.5, 0.8, 1.0]`). Nếu dùng **GHz thực**, phải fit lại hệ số cho đúng đơn vị.
+* `α_p` (W) — thành phần **động** bậc ba theo f (phù hợp DVFS).
+* `β_p` (W) — thành phần động bậc một theo f (rò rỉ + phần tuyến tính).
+* `γ_p` (W) — **bù tĩnh** gần tương đương “idle offset” khi job đang chạy (khác `p_idle` của GPUType, vì đây là offset **trong** mô hình job).
+
+Điện năng cho **một job** dùng `n` GPU tại tần số `f`:
+
+$$
+P_{\text{job}}(n,f)=n \cdot P_{\text{gpu}}(f)
+$$
+
+**Gợi ý fit:**
+
+* Đo công suất theo nhiều mức f khi job chạy (ổn định vài giây) → hồi quy đa thức $(f^3, f, 1)$.
+* Ràng buộc hợp lý: $\alpha_p\ge0, \beta_p\ge0, \gamma_p\ge 0$.
+
+### `TrainLatencyCoeffs(α_t, β_t, γ_t)` — mô hình thời gian trên mỗi “đơn vị công việc”
+
+Công thức:
+
+$$T(n,f) \;=\; \alpha_t \;+\; \frac{\beta_t}{f} \;+\; \gamma_t \, n \quad\text{(s / unit)}$$
+
+* `unit` là **đơn vị công việc** người dùng định nghĩa trong simulator (ví dụ “một step training”, “một micro-batch”, hay “một batch inference cỡ b”).
+* `α_t` (s/unit) — overhead cố định (IO, setup).
+* `β_t` (s·(unit)·f) — phần tính toán **ngược tỉ lệ** với f (tăng f thì nhanh hơn).
+* `γ_t` (s/(unit·GPU)) — **phạt mở rộng** theo số GPU (đồng bộ, all-reduce…). Giá trị này **nhỏ**; nếu đặt lớn sẽ “giết” mọi lợi ích scale-out.
+
+**Lưu ý:**
+Với công thức như trên, tăng `n` **làm tăng** $T(n,f)$ (vì $+\gamma_t n$). Nếu muốn **scale-out có lợi**, dùng biến thể:
+
+$$
+T(n,f) \;=\; \alpha_t \;+\; \frac{\beta_t}{f \, n^{\eta}} \;+\; \gamma_t \, n,\quad 0<\eta\le1,
+$$
+
+hoặc đơn giản thay $\beta_t/f$ thành $\beta_t/(f\cdot n)$ rồi fit lại. Nếu không chỉnh, tối ưu sẽ luôn nghiêng về **n=1** (phản thực tế).
+
+**Gợi ý fit:**
+
+* Cố định `unit` rõ ràng (vd. “1 micro-batch 1k tokens”).
+* Đo thời gian ở nhiều mức f và n → hồi quy phi tuyến theo gợi ý trên.
+
+### Cách simulator dùng các hệ số
+
+* **Service time** của một job:
+  `service_time = job.size * T(n,f)` (trong code: `job.size` là số unit).
+* **Công suất tức thời** khi job chạy:
+  `P_job = n * P_gpu(f)`.
+* **Năng lượng dự đoán** (tiện log/so sánh):
+  `E_pred = P_job * T(n,f)`.
+
+Các hệ số **không phụ thuộc** `GPUType.p_idle/p_sleep` — các số này chỉ dùng cho **GPU rảnh** (idle/sleep) ở mô hình DC. Khi job chạy, điện năng job đến từ `TrainPowerCoeffs`.
+
+### Đơn vị & miền giá trị khuyến nghị
+
+* `f`
+
+  * **Khuyên dùng chuẩn hoá**: $f\in(0,1]$, với 1.0 = mức “nominal”.
+  * Nếu dùng GHz thực, ghi rõ và **fit lại** mọi hệ số.
+* `P` (W), `T` (s/unit).
+* Ràng buộc:
+
+  * $\alpha_p,\beta_p,\gamma_p \ge 0$.
+  * $\alpha_t,\beta_t \ge 0$; $\gamma_t \ge 0$ nhưng **nhỏ**.
+  * Đảm bảo $T(n,f)>0$ ở mọi mức dùng.
+
+## Request đến
+
+Cấu trúc code:
+```python
+build_arrivals(
+  inf_mode=args.inf_mode,   # "poisson" | "sinusoid"
+  inf_rate=args.inf_rate,   # float, đơn vị: yêu cầu/giây
+  inf_amp=args.inf_amp,     # float, biên độ dao động (chỉ dùng khi sinusoid)
+  inf_period=args.inf_period,# float, chu kỳ (giây, chỉ dùng khi sinusoid)
+  trn_mode=args.trn_mode,   # "poisson" | "sinusoid"
+  trn_rate=args.trn_rate    # float, yêu cầu/giây
+)
+```
+
+Khai báo **quy luật đến** (arrival process) cho hai luồng:
+
+* `inference` (ngắn, nhạy SLA)
+* `training` (dài, ít nhạy SLA, có thể bị preempt)
+
+Simulator sẽ sinh **sự kiện đến** theo cấu hình này và đẩy vào router/DC.
+
+**Các tham số**
+
+* `*_mode`: kiểu tiến trình đến
+	* `"poisson"`: tốc độ đến **không đổi** $\lambda$. Khoảng cách giữa hai arrival i.i.d. **mũ** ⇒ CV=1.
+	* `"sinusoid"`: tốc độ đến **thay đổi theo thời gian**:
+
+  $$
+  \lambda(t)=\max\big(0,\ \text{rate}\cdot[1 + \text{amp}\cdot \sin(2\pi\, t/\text{period})]\big)
+  $$
+
+  Dùng **thinning** để sinh arrival; biên dao động được kiểm soát bởi `amp`.
+
+> Nếu workload phẳng lì thì cứ Poisson; còn đã có nhịp ngày/đêm, giờ cao điểm, sự kiện… thì Sinusoid.
+
+* `*_rate` (đơn vị: yêu cầu/giây)
+	* **Tốc độ trung bình** của tiến trình.
+	* Với sinusoid, **kỳ vọng** vẫn bằng `rate` (vì trung bình của sin bằng 0). Đừng ngộ nhận `amp` làm đổi tổng tải trung bình—nó chỉ **phân phối lại theo thời gian**.
+
+* `inf_amp` (0…∞, chỉ sinusoid): **Biên độ tương đối**.
+
+  * `0` ⇒ không dao động (quay về hằng).
+  * `0.6` ⇒ $\lambda(t)$ dao động ±60% quanh `rate`.
+  * > 1 vẫn được, phần âm sẽ bị **cắt về 0**. Nhưng hạn chế >1 nếu không muốn “cụt” pha thấp.
+
+* `inf_period` (giây, chỉ sinusoid). Chu kỳ của dao động. Ví dụ:
+
+  * `3600` ⇒ nhịp theo **giờ**,
+  * `86400` ⇒ **ngày/đêm**.
+
+* `trn_rate`, `trn_mode`. Tương tự phía inference nhưng cho **luồng training**. Thường để Poisson với tốc độ thấp (ví dụ `0.1–0.5 req/s`) để phản ánh job dài ít xuất hiện.
+
+## Cách simulator sinh arrival
+
+* **Poisson**: $\Delta \sim \text{Exp}(\lambda)$. Nếu `rate<=0` ⇒ **không có arrival** (trả `inf`).
+* **Sinusoid**: dùng **acceptance-rejection (thinning)** với $\lambda_{\max}=\text{rate}(1+|\text{amp}|)$. Sinh thời gian chờ từ Exp($\lambda_{\max}$), rồi **chấp nhận** với xác suất $\lambda(t)/\lambda_{\max}$.
+
+* **Đơn vị**: mọi thứ đang là **yêu cầu/giây**, **chu kỳ theo giây**.
+* **Cân bằng tải**: tổng $\mathbb{E}[N]$ trong thời gian $T$ là `rate*T` cho sinusoid. Nếu không đạt target arrival trong log ⇒ lỗi nằm ở **service time** (T(n,f)) hoặc **router**, **không** phải ở `amp`.
+* **Burst**: Poisson **không** tạo “wave” dài; nếu cần lưu lượng lớn thay vì nhiễu lẻ tẻ, dùng sinusoid hoặc nạp **trace thực**.
+
+
+### Công thức “ước lượng” để set tham số hợp lý
+
+Giả sử muốn inference **không quá tải**:
+
+* Mỗi GPU ở `f=1` xử lý được \~$\mu$ **unit/s** (từ `TrainLatencyCoeffs`), một job inference tiêu tốn $u$ unit trung bình.
+* Một DC có $G$ GPU, phân bổ trung bình $g$ GPU cho mỗi request inference.
+  ⇒ Năng lực \~ $\text{cap} \approx \dfrac{G}{g}\cdot\dfrac{\mu}{u}$ **req/s**.
+* Chọn `inf_rate` < **tổng** `cap` của các DC *mà router sẽ chọn tới*; nếu dùng sinusoid, đảm bảo **đỉnh** $\text{rate}(1+\text{amp})$ vẫn ≤ **tổng cap** hoặc chấp nhận hàng đợi.
+
+### Mẫu cấu hình
+
+1) Inference nhịp ngày/đêm, training lác đác
+
+```bash
+python run_sim_paper.py \
+  --inf-mode sinusoid --inf-rate 4.0 --inf-amp 0.7 --inf-period 86400 \
+  --trn-mode poisson  --trn-rate 0.2 \
+  --duration 72000
+```
+
+2) Căng tải giờ cao điểm 5 phút/lần, training êm
+
+```bash
+python run_sim_paper.py \
+  --inf-mode sinusoid --inf-rate 6.0 --inf-amp 0.6 --inf-period 300 \
+  --trn-mode poisson  --trn-rate 0.3 \
+  --duration 1800
+```
+
+3) Poisson phẳng để benchmark policy
+
+```bash
+python run_sim_paper.py \
+  --inf-mode poisson --inf-rate 5.0 \
+  --trn-mode poisson --trn-rate 0.2 \
+  --duration 1200
+```
+
+# Cách chạy
+
+## baseline (không hãm công suất)
+```commandline
+python run_sim_paper.py --algo baseline --duration 120
+```
+
+## hãm công suất toàn cụm 8 kW bằng giảm f theo bước rời rạc
+```commandline
+python run_sim_paper.py --algo cap_uniform --power-cap 8000 --duration 120
+```
+
+## dùng khung aggregate (tính down-series) nhưng hiện áp dụng giống cap_uniform
+```commandline
+python run_sim_paper.py --algo cap_greedy --power-cap 8000 --duration 120
+```
