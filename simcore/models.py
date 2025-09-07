@@ -54,12 +54,9 @@ class DataCenter:
     def free_gpus(self) -> int:
         return self.total_gpus - self.busy_gpus
 
-    def instantaneous_power_w(self) -> float:
-        from .energy import instantaneous_power_w
-        return instantaneous_power_w(self)
-
     def accrue_energy(self, now: float):
+        from .energy_paper import instantaneous_power_w
         dt = max(0.0, now - self.last_energy_time)
         if dt > 0.0:
-            self.energy_joules += self.instantaneous_power_w() * dt
+            self.energy_joules += instantaneous_power_w(self) * dt
             self.last_energy_time = now

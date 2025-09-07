@@ -8,7 +8,7 @@ from .latency_paper import step_time_s
 from .policy_paper import energy_tuple, best_nf_grid
 from .network import Ingress, Graph
 from .router import RouterPolicy, select_dc
-from .energy_paper import gpu_power_w
+from .energy_paper import gpu_power_w, task_power_w
 from .learners import BanditDVFS
 
 Event = Tuple[float, int, str, dict]
@@ -81,7 +81,8 @@ class MultiIngressPaperSimulator:
         p_active = 0.0
         for job, g in dc.running_jobs.values():
             pC, tC = self.coeffs_map[(dc.name, job.jtype)]
-            p_active += g * gpu_power_w(f, pC)
+            f_job = getattr(job, "f_used", f)
+            p_active += task_power_w(g, f_job, pC)
         # Idle
         idle = dc.total_gpus - dc.busy_gpus
         gt = dc.gpu_type

@@ -1,6 +1,6 @@
 from typing import Iterable, Tuple
 from .coeffs import TrainPowerCoeffs, TrainLatencyCoeffs
-from .energy_paper import gpu_power_w
+from .energy_paper import gpu_power_w, task_power_w
 from .latency_paper import step_time_s
 
 def best_energy_freq(n: int, freq_levels: Iterable[float],
@@ -8,7 +8,7 @@ def best_energy_freq(n: int, freq_levels: Iterable[float],
     best_f, best_e = None, float('inf')
     for f in freq_levels:
         T = step_time_s(n, f, t_coeffs)
-        P = n * gpu_power_w(f, p_coeffs)
+        P = task_power_w(n, f, p_coeffs)
         E = P * T
         if E < best_e:
             best_e, best_f = E, f
@@ -29,7 +29,7 @@ def keep_perf_when_expand(n0: int, f0: float, n1: int,
 def energy_tuple(n: int, f: float,
                  p_coeffs: TrainPowerCoeffs, t_coeffs: TrainLatencyCoeffs) -> Tuple[float, float, float]:
     T = step_time_s(n, f, t_coeffs)
-    P = n * gpu_power_w(f, p_coeffs)
+    P = task_power_w(n, f, p_coeffs)
     E = P * T
     return (T, P, E)
 
@@ -45,7 +45,7 @@ def best_nf_grid(n_max: int, freq_levels,
     for n in range(1, max(1, int(n_max))+1):
         for f in freq_levels:
             T = step_time_s(n, f, t_coeffs)             # s per unit
-            P = n * gpu_power_w(f, p_coeffs)            # W
+            P = task_power_w(n, f, p_coeffs)            # W
             E = P * T                                   # J per unit
             if deadline_s is not None and T > deadline_s:
                 continue
