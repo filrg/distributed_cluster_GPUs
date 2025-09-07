@@ -101,3 +101,11 @@ def build_carbon_intensity():
 def build_router_policy():
     # ưu tiên năng lượng + độ trễ; thêm w_carbon nếu muốn carbon-aware
     return RouterPolicy(w_energy=1.0, w_latency=0.5, w_carbon=0.0, d_choices=0)
+
+def build_energy_price():
+    # USD/kWh theo giờ (demo): giờ cao điểm đắt
+    return { # key: hour (0..23)
+        **{h: 0.12 for h in range(0,7)},
+        **{h: 0.20 for h in range(7,19)},
+        **{h: 0.16 for h in range(19,24)}
+    }

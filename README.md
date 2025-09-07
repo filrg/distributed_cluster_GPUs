@@ -223,17 +223,81 @@ python run_sim_paper.py \
 
 # Cách chạy với các thuật toán khác nhau
 
-## baseline (không hãm công suất)
-```commandline
-python run_sim_paper.py --algo baseline --duration 120
+Danh sách các mode thuật toán được dựng từ các nghiên cứu:
+- `cap_uniform`, `cap_greedy`: Providing Load Flexiblity by Reshaping Power Profiles of Large Language Models.
+- `joint_nf`: SLO-aware GPU Frequency Scaling for Energy Efficient LLM Inference Serving.
+- `bandit`: https://tor-lattimore.com/downloads/book/book.pdf
+- `carbon_cost`: Carbon-Aware Computing for Datacenters.
+
+## `baseline` (không hãm công suất)
+
+Không điều khiển nguồn; chỉ policy mặc định cấp phát GPU và ấn định một $f$ chung cho DC.
+
+```bash
+python run_sim_paper.py --algo baseline \
+  --duration 1200 --log-interval 5
 ```
 
-## hãm công suất toàn cụm 8 kW bằng giảm f theo bước rời rạc
-```commandline
-python run_sim_paper.py --algo cap_uniform --power-cap 8000 --duration 120
+Kỳ vọng: `cluster_log.csv` cho thấy `freq` giữ nguyên; công suất chỉ thay đổi theo số job.
+
+## `cap_uniform` (power-capping đồng loạt theo DC)
+
+Giảm $f$ từng nấc; mỗi vòng chọn **DC** có $\Delta P$ lớn nhất khi hạ một nấc.
+
+```bash
+python run_sim_paper.py --algo cap_uniform \
+  --duration 1200 --log-interval 5 --power-cap 8000 --control-interval 2 
 ```
 
-## dùng khung aggregate (tính down-series) nhưng hiện áp dụng giống cap_uniform
-```commandline
-python run_sim_paper.py --algo cap_greedy --power-cap 8000 --duration 120
+Kỳ vọng: tổng $P$ tiệm cận `--power-cap`. Nếu vượt cap không giảm tiếp, kiểm tra `freq_levels` và còn “nấc” để hạ không. (Cơ chế chọn theo bước DVFS dựa trên ý tưởng điểm biên.
+
+## `cap_greedy` (aggregate-based, cấp **job**)
+
+Xây atoms per-job (bước $f_i\to f_{i-1}$ với $\Delta P,\Delta V$), sắp theo $\Delta P/\Delta V$, rồi **đánh vào job rẻ nhất** cho tới khi bù xong thâm hụt so với cap.
+
+```bash
+python run_sim_paper.py --algo cap_greedy \
+  --duration 1200 --log-interval 5 --power-cap 8000 --control-interval 2
+```
+
+Yêu cầu: đã bật **per-job DVFS + reschedule**. Nếu chưa, hành vi sẽ gần `cap_uniform`. (Thuật toán bám đúng aggregation từ khung trong paper.
+
+## `joint_nf` (tối ưu đồng thời số GPU & tần số theo SLO)
+
+Mỗi khi job sẵn sàng chạy, duyệt lưới $n\in[1..N_{\max}], f\in\text{freq\_levels}$; chọn nghiệm **min năng lượng** (hoặc carbon/cost) **thoả SLA**.
+
+```bash
+python run_sim_paper.py --algo joint_nf \
+  --duration 1200 --log-interval 5
+```
+
+Gợi ý:
+
+* Gán `job.deadline` cho inference nếu muốn ràng buộc SLO.
+* Hệ số $T(n,f)$ phải hợp lý.
+  Cơ sở lựa chọn: DVFS-aware, SLO-aware scaling trên LLM cho thấy tồn tại điểm tốt (vd. \~1050 MHz trên A100) đem lại +\~37% hiệu quả năng lượng với ảnh hưởng hiệu năng nhỏ.
+
+## `bandit` (UCB1)
+
+Mỗi DC/job_type xem mỗi $f$ là một arm. Khi job tới: **chọn** $f$ theo UCB1; khi job xong: **cập nhật** reward = −(năng lượng/đơn vị). Không cần mô hình chính xác, tự thích nghi theo workload.
+
+```bash
+python run_sim_paper.py --algo bandit \
+  --duration 1200 --log-interval 5
+```
+
+Gợi ý:
+
+* Đặt `init_explore=1` (mặc định trong learner) để thử qua mọi $f$.
+* Reward có thể chuyển sang **carbon** (−E·CI) hoặc **cost** (−E·price).
+  Lý thuyết UCB1 và biến thể (UCB1-Tuned) là nền tảng kinh điển cho tối ưu thăm-dò/khai-thác.
+
+## `carbon_cost` (carbon-/cost-aware)
+
+Chọn $n,f$ sao cho **min** $E\cdot\text{CI(dc)}$ **hoặc** $(E/3.6\text{e}6)\cdot\text{price(dc, hour)}$.
+(Ở tầng routing có thể đi theo DC có CI thấp — Carbon-Intelligent Compute.)
+
+```bash
+python run_sim_paper.py --algo carbon_cost \
+  --duration 1200 --log-interval 5
 ```

@@ -32,3 +32,40 @@ def energy_tuple(n: int, f: float,
     P = n * gpu_power_w(f, p_coeffs)
     E = P * T
     return (T, P, E)
+
+def best_nf_grid(n_max: int, freq_levels,
+                 p_coeffs: TrainPowerCoeffs, t_coeffs: TrainLatencyCoeffs,
+                 objective: str = "energy",        # "energy" | "carbon"
+                 carbon_intensity: float = 0.0,     # gCO2/kWh (tương đối cũng được)
+                 price_kwh: float = 0.0, deadline_s=None):
+    """
+    Trả về (n*, f*, T*, P*, E*). f_levels là list float.
+    """
+    best = None
+    for n in range(1, max(1, int(n_max))+1):
+        for f in freq_levels:
+            T = step_time_s(n, f, t_coeffs)             # s per unit
+            P = n * gpu_power_w(f, p_coeffs)            # W
+            E = P * T                                   # J per unit
+            if deadline_s is not None and T > deadline_s:
+                continue
+
+            if objective == "energy":
+                score = E
+            elif objective == "carbon":
+                score = E * carbon_intensity  # J * gCO2/kWh (relative OK)
+            elif objective == "cost":
+                score = (E / 3.6e6) * float(price_kwh)  # J -> kWh, rồi * giá
+            else:
+                score = E
+
+            cand = (score, n, f, T, P, E)
+            if (best is None) or (cand[0] < best[0]):
+                best = cand
+    if best is None:
+        # fallback: dùng n=1, f=max
+        fmax = max(freq_levels)
+        T = step_time_s(1, fmax, t_coeffs); P = gpu_power_w(fmax, p_coeffs); E = P*T
+        return (1, fmax, T, P, E)
+    _, n, f, T, P, E = best
+    return (n, f, T, P, E)

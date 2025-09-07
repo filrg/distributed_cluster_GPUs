@@ -1,14 +1,15 @@
 import csv, heapq, itertools, random
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional, Union
 from .models import Job, DataCenter
 from .arrivals import ArrivalConfig
 from .policy import PolicyConfig, select_gpus_and_set_freq
 from .coeffs import TrainPowerCoeffs, TrainLatencyCoeffs
 from .latency_paper import step_time_s
-from .policy_paper import energy_tuple
+from .policy_paper import energy_tuple, best_nf_grid
 from .network import Ingress, Graph
 from .router import RouterPolicy, select_dc
 from .energy_paper import gpu_power_w
+from .learners import BanditDVFS
 
 Event = Tuple[float, int, str, dict]
 
@@ -25,8 +26,9 @@ class MultiIngressPaperSimulator:
                  arrival_inf: ArrivalConfig,
                  arrival_train: ArrivalConfig,
                  router_policy: RouterPolicy,
-                 coeffs_map: Dict[Tuple[str, str], Tuple[TrainPowerCoeffs, TrainLatencyCoeffs]],
-                 carbon_intensity: Dict[str, float] = None,
+                 coeffs_map: Dict[Tuple, Tuple],
+                 carbon_intensity: Optional[Dict[str, float]] = None,
+                 energy_price: Optional[Union[Dict[int, float], Dict[str, Dict[int, float]]]] = None,
                  policy: PolicyConfig = None,
                  sim_duration: float = 3600.0,
                  log_interval: float = 10.0,
@@ -46,6 +48,7 @@ class MultiIngressPaperSimulator:
         self.router_policy = router_policy
         self.coeffs_map = coeffs_map
         self.carbon = carbon_intensity or {}
+        self.energy_price = energy_price or {}
         self.policy = policy or PolicyConfig(name="energy_aware")
         random.seed(rng_seed)
         self.jid_counter = itertools.count(1)
@@ -56,6 +59,7 @@ class MultiIngressPaperSimulator:
         self.algo = algo
         self.power_cap = power_cap
         self.control_interval = control_interval
+        self.bandit = BanditDVFS(init_explore=1, objective="energy") if algo == "bandit" else None
 
         # schedule arrivals per ingress
         for ing in self.ingresses.values():
@@ -259,9 +263,54 @@ class MultiIngressPaperSimulator:
         job.net_latency_s = payload['net_lat_s']
         # enqueue or start
         if dc.free_gpus > 0:
-            gpus = select_gpus_and_set_freq(dc, job, self.policy)
-            if gpus > 0:
-                return self._start_job(dc, job, gpus)
+            if self.algo == "joint_nf":
+                pC, tC = self.coeffs_map[(dc.name, job.jtype)]
+                # deadline cho inference, còn training thì None
+                ddl = getattr(job, "deadline", None)
+                # mục tiêu "energy" ở đây (hoặc "carbon" nếu muốn carbon-aware)
+                n_star, f_star, *_ = best_nf_grid(
+                    n_max=self.policy.max_gpus_per_job,
+                    freq_levels=dc.freq_levels,
+                    p_coeffs=pC, t_coeffs=tC,
+                    objective="energy",
+                    carbon_intensity=0.0,
+                    deadline_s=ddl
+                )
+                return self._start_job_with_nf(dc, job, n_star, f_star)
+            elif self.algo == "bandit":
+                # chọn n theo policy (vd ưu tiên 1 cho inference, 2-4 cho training)
+                n_try = min(dc.free_gpus, self.policy.max_gpus_per_job)
+                f_try = self.bandit.select(dc.name, job.jtype, dc.freq_levels)
+                return self._start_job_with_nf(dc, job, n_try, f_try)
+            elif self.algo == "carbon_cost":
+                pC, tC = self.coeffs_map[(dc.name, job.jtype)]
+                price = self._price_kwh(dc.name)  # <— dùng helper
+                CI = self.carbon.get(dc.name, 0.0)
+                # Nếu có bảng giá -> tối ưu chi phí; nếu không -> tối ưu carbon
+                if price > 0.0:
+                    n_star, f_star, *_ = best_nf_grid(
+                        n_max=self.policy.max_gpus_per_job,
+                        freq_levels=dc.freq_levels,
+                        p_coeffs=pC, t_coeffs=tC,
+                        objective="cost",
+                        price_kwh=price,
+                        deadline_s=getattr(job, "deadline", None)
+                    )
+                else:
+                    n_star, f_star, *_ = best_nf_grid(
+                        n_max=self.policy.max_gpus_per_job,
+                        freq_levels=dc.freq_levels,
+                        p_coeffs=pC, t_coeffs=tC,
+                        objective="carbon",
+                        carbon_intensity=CI,
+                        deadline_s=getattr(job, "deadline", None)
+                    )
+                return self._start_job_with_nf(dc, job, n_star, f_star)
+            else:
+                gpus = select_gpus_and_set_freq(dc, job, self.policy)
+                if gpus > 0:
+                    return self._start_job(dc, job, gpus)
+
         (dc.q_inf if job.jtype == 'inference' else dc.q_train).append(job)
 
     def _start_job(self, dc: DataCenter, job: Job, gpus: int):
@@ -294,16 +343,23 @@ class MultiIngressPaperSimulator:
         dc.busy_gpus = max(0, dc.busy_gpus - g)
         job.finish_time = self.now
 
+        # Dùng f_used nếu đã bật per-job DVFS; fallback = tần số DC hiện tại
         p_coeffs, t_coeffs = self.coeffs_map[(dc.name, job.jtype)]
-        T_pred, P_pred, E_pred = energy_tuple(g, dc.current_freq, p_coeffs, t_coeffs)
+        f_used = getattr(job, "f_used", dc.current_freq)
+        T_pred, P_pred, E_pred = energy_tuple(g, f_used, p_coeffs, t_coeffs)  # per-unit
+
         with open(self.job_log_path, 'a', newline='') as f:
             csv.writer(f).writerow([
                 job.jid, job.dc_name, job.jtype, f"{job.size:.4f}", dc.name,
-                f"{dc.current_freq:.3f}", g, f"{getattr(job,'net_latency_s',0.0):.4f}",
+                f"{f_used:.3f}", g, f"{getattr(job,'net_latency_s',0.0):.4f}",
                 f"{job.start_time:.6f}", f"{job.finish_time:.6f}",
                 f"{(job.finish_time - job.start_time):.6f}",
                 f"{T_pred:.6f}", f"{P_pred:.2f}", f"{E_pred:.2f}"
             ])
+
+        # Bandit: cập nhật reward = - energy_per_unit (hoặc đổi sang carbon/cost nếu muốn)
+        if getattr(self, "bandit", None) is not None:
+            self.bandit.update(dc.name, job.jtype, f_used, E_pred)
 
         # start next jobs (inference first)
         while dc.free_gpus > 0:
@@ -313,11 +369,45 @@ class MultiIngressPaperSimulator:
             elif dc.q_train:
                 nxt = dc.q_train.pop(0)
             if nxt is None: break
-            gpus = select_gpus_and_set_freq(dc, nxt, self.policy)
-            if gpus <= 0:
-                (dc.q_inf if nxt.jtype == 'inference' else dc.q_train).insert(0, nxt)
-                break
-            self._start_job(dc, nxt, gpus)
+
+            # Nhánh theo thuật toán
+            if self.algo == "joint_nf":
+                pC, tC = self.coeffs_map[(dc.name, nxt.jtype)]
+                n_star, f_star, *_ = best_nf_grid(
+                    n_max=self.policy.max_gpus_per_job,
+                    freq_levels=dc.freq_levels,
+                    p_coeffs=pC, t_coeffs=tC,
+                    objective="energy",
+                    carbon_intensity=0.0,
+                    deadline_s=getattr(nxt, "deadline", None)
+                )
+                self._start_job_with_nf(dc, nxt, n_star, f_star)
+
+            elif self.algo == "bandit":
+                n_try = min(dc.free_gpus, self.policy.max_gpus_per_job)
+                f_try = self.bandit.select(dc.name, nxt.jtype, dc.freq_levels)
+                self._start_job_with_nf(dc, nxt, n_try, f_try)
+
+            elif self.algo == "carbon_cost":
+                pC, tC = self.coeffs_map[(dc.name, nxt.jtype)]
+                CI = self.carbon.get(dc.name, 0.0)
+                n_star, f_star, *_ = best_nf_grid(
+                    n_max=self.policy.max_gpus_per_job,
+                    freq_levels=dc.freq_levels,
+                    p_coeffs=pC, t_coeffs=tC,
+                    objective="carbon",
+                    carbon_intensity=CI,
+                    deadline_s=getattr(nxt, "deadline", None)
+                )
+                self._start_job_with_nf(dc, nxt, n_star, f_star)
+
+            else:
+                # baseline / cap_* : dùng policy cũ
+                gpus = select_gpus_and_set_freq(dc, nxt, self.policy)
+                if gpus <= 0:
+                    (dc.q_inf if nxt.jtype == 'inference' else dc.q_train).insert(0, nxt)
+                    break
+                self._start_job(dc, nxt, gpus)
 
     def _handle_log(self, interval: float):
         with open(self.cluster_log_path, 'a', newline='') as f:
@@ -332,3 +422,80 @@ class MultiIngressPaperSimulator:
                             len(dc.q_inf), len(dc.q_train),
                             f"{power_now:.2f}", f"{dc.energy_joules/1000.0:.4f}"])
         self._schedule(self.now + interval, 'log', {'interval': interval})
+
+    def best_nf_grid(n_max: int, freq_levels,
+                     p_coeffs: TrainPowerCoeffs, t_coeffs: TrainLatencyCoeffs,
+                     objective: str = "energy",  # "energy" | "carbon"
+                     carbon_intensity: float = 0.0,  # gCO2/kWh (tương đối cũng được)
+                     deadline_s: float | None = None):
+        """
+        Trả về (n*, f*, T*, P*, E*). f_levels là list float (đã chuẩn hóa như đang dùng).
+        """
+        best = None
+        for n in range(1, max(1, int(n_max)) + 1):
+            for f in freq_levels:
+                T = step_time_s(n, f, t_coeffs)  # s per unit
+                P = n * gpu_power_w(f, p_coeffs)  # W
+                E = P * T  # J per unit
+                if deadline_s is not None and T > deadline_s:
+                    continue
+                score = E if objective == "energy" else (E * carbon_intensity)
+                cand = (score, n, f, T, P, E)
+                if (best is None) or (cand[0] < best[0]):
+                    best = cand
+        if best is None:
+            # fallback: dùng n=1, f=max
+            fmax = max(freq_levels)
+            T = step_time_s(1, fmax, t_coeffs);
+            P = gpu_power_w(fmax, p_coeffs);
+            E = P * T
+            return (1, fmax, T, P, E)
+        _, n, f, T, P, E = best
+        return (n, f, T, P, E)
+
+    def _start_job_with_nf(self, dc, job, n, f):
+        # cấp phát
+        n = max(1, min(n, dc.free_gpus))
+        if n <= 0:
+            (dc.q_inf if job.jtype == 'inference' else dc.q_train).append(job);
+            return
+        dc.busy_gpus += n
+        dc.running_jobs[job.jid] = (job, n)
+        job.gpus_assigned = n
+        job.start_time = self.now
+        # per-job DVFS (nếu đã thêm f_used/ev_gen, dùng như sau; nếu chưa, coi như DC-level)
+        if hasattr(job, "f_used"):
+            job.f_used = f
+            job.units_total = job.size
+            job.units_done = 0.0
+            job.last_update = self.now
+            job.ev_gen += 1
+        p_coeffs, t_coeffs = self.coeffs_map[(dc.name, job.jtype)]
+        T_unit = step_time_s(n, f, t_coeffs)
+        self._schedule(self.now + job.size * T_unit, 'job_finish',
+                       {'dc': dc.name, 'jid': job.jid, 'gen': getattr(job, "ev_gen", 0)})
+
+    def _current_hour(self) -> int:
+        """Giờ hiện tại (0..23) trong ngày mô phỏng, tính theo self.now (giây)."""
+        return int((self.now % 86400) // 3600)
+
+    def _price_kwh(self, dc_name: str) -> float:
+        """
+        Giá điện (USD/kWh) tại giờ hiện tại cho DC.
+        Hỗ trợ 2 format:
+          - Global hourly map: {hour:int -> price:float}
+          - Per-DC hourly map: {dc_name:str -> {hour:int -> price:float}}
+        """
+        ep = getattr(self, "energy_price", {}) or {}
+        h = self._current_hour()
+
+        # Global hourly map? (keys là int)
+        if ep and all(isinstance(k, int) for k in ep.keys()):
+            return float(ep.get(h, 0.0))
+
+        # Per-DC hourly map? (keys là tên DC)
+        dc_map = ep.get(dc_name)
+        if isinstance(dc_map, dict):
+            return float(dc_map.get(h, 0.0))
+
+        return 0.0
