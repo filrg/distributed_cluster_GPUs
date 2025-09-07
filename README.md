@@ -264,7 +264,7 @@ Yêu cầu: đã bật **per-job DVFS + reschedule**. Nếu chưa, hành vi sẽ
 
 ## `joint_nf` (tối ưu đồng thời số GPU & tần số theo SLO)
 
-Mỗi khi job sẵn sàng chạy, duyệt lưới $n\in[1..N_{\max}], f\in\text{freq\_levels}$; chọn nghiệm **min năng lượng** (hoặc carbon/cost) **thoả SLA**.
+Mỗi khi job sẵn sàng chạy, duyệt lưới $n \in [1 .. N_{\max}], f \in \text{freq\_levels}$; chọn nghiệm **min năng lượng** (hoặc carbon/cost) **thoả SLA**.
 
 ```bash
 python run_sim_paper.py --algo joint_nf \
