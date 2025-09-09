@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, Tuple, Iterable
+from typing import Dict, Tuple
 from .models import DataCenter
 from .coeffs import TrainPowerCoeffs, TrainLatencyCoeffs
 from .latency_paper import step_time_s

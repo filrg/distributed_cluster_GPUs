@@ -1,12 +1,14 @@
 import math, random
 from dataclasses import dataclass
 
+
 def expovariate_safe(lmbda: float) -> float:
     return float('inf') if lmbda <= 0 else random.expovariate(lmbda)
 
+
 @dataclass
 class ArrivalConfig:
-    mode: str          # 'poisson' | 'sinusoid'
+    mode: str  # 'poisson' | 'sinusoid'
     rate: float
     amp: float = 0.0
     period: float = 3600.0
@@ -16,7 +18,7 @@ class ArrivalConfig:
             return self.rate
         elif self.mode == 'sinusoid':
             return max(0.0, self.rate * (1.0 + self.amp *
-                         math.sin(2 * math.pi * (t % self.period) / self.period)))
+                                         math.sin(2 * math.pi * (t % self.period) / self.period)))
         raise ValueError("Unknown mode")
 
     def next_interarrival(self, t: float) -> float:

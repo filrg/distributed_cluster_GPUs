@@ -10,6 +10,7 @@ from .network import Ingress, Graph
 from .router import RouterPolicy, select_dc
 from .energy_paper import gpu_power_w, task_power_w
 from .learners import BanditDVFS
+from .freq_load_agg import TaskState, aggregate_with_atoms
 
 Event = Tuple[float, int, str, dict]
 
@@ -133,7 +134,6 @@ class MultiIngressPaperSimulator:
             return self._cap_uniform(deficit)
 
         # ---- cap_greedy: chọn 'atoms' per-job theo aggregate ----
-        from .freq_load_agg import TaskState, aggregate_with_atoms
         tasks = []
         for dc in self.dcs.values():
             levels = dc.freq_levels
@@ -159,7 +159,6 @@ class MultiIngressPaperSimulator:
     def _job_rate_units_per_s(self, dc, job, gpus, f):
         # 1 unit công việc mất T_unit(n,f) giây ⇒ tốc độ (units/s) = 1 / T_unit
         _, tC = self.coeffs_map[(dc.name, job.jtype)]
-        from .latency_paper import step_time_s
         T_unit = step_time_s(gpus, f, tC)
         return 1.0 / max(T_unit, 1e-9)
 

@@ -1,6 +1,7 @@
 from typing import Iterable, List
 from .models import GPUType
 
+
 def validate_gpus(gpus: Iterable[GPUType], strict: bool = False) -> List[str]:
     """
     Trả về danh sách cảnh báo. Nếu strict=True và có cảnh báo, raise ValueError.

@@ -1,11 +1,12 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+
 @dataclass
 class Job:
     jid: int
-    jtype: str          # 'inference' | 'training'
-    size: float         # compute units trừu tượng
+    jtype: str  # 'inference' | 'training'
+    size: float  # compute units trừu tượng
     arrival_time: float
     deadline: Optional[float] = None
     dc_name: Optional[str] = None
@@ -19,21 +20,23 @@ class Job:
     last_update: float = 0.0  # thời điểm cuối cùng ta “tiến độ hoá”
     ev_gen: int = 0  # thế hệ event; dùng để vô hiệu hoá job_finish cũ
 
+
 @dataclass
 class GPUType:
     name: str
-    p_idle: float       # W, GPU rảnh nhưng bật xung
-    p_peak: float       # W, phần động tại f=1.0 (cộng vào idle)
-    p_sleep: float      # W, khi power-gate (DRS)
+    p_idle: float  # W, GPU rảnh nhưng bật xung
+    p_peak: float  # W, phần động tại f=1.0 (cộng vào idle)
+    p_sleep: float  # W, khi power-gate (DRS)
     alpha: float = 3.0  # công suất động ~ f^alpha
-    tdp: Optional[float] = None # TDP/TBP khai báo (W); dùng cho validator
+    tdp: Optional[float] = None  # TDP/TBP khai báo (W); dùng cho validator
+
 
 @dataclass
 class DataCenter:
     name: str
     gpu_type: GPUType
     total_gpus: int
-    freq_levels: List[float]     # ví dụ [0.6, 0.8, 1.0]
+    freq_levels: List[float]  # ví dụ [0.6, 0.8, 1.0]
     default_freq: float = 1.0
     power_gating: bool = True
 

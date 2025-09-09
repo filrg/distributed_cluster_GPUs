@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from .models import DataCenter, Job
 
+
 @dataclass
 class PolicyConfig:
     name: str  # 'perf_first' or 'energy_aware'
@@ -10,6 +11,7 @@ class PolicyConfig:
     dvfs_high: float = 1.0
     train_scale_out_low_freq: bool = True
     reserve_inf_gpus: int = 0
+
 
 def select_gpus_and_set_freq(dc: DataCenter, job: Job, policy: PolicyConfig) -> int:
     free = dc.free_gpus

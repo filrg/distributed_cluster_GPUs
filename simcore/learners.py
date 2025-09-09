@@ -1,5 +1,5 @@
-from collections import defaultdict
 import math, random
+from collections import defaultdict
 
 class BanditDVFS:
     """
