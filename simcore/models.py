@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Callable
 
 
 @dataclass
@@ -48,6 +48,9 @@ class DataCenter:
     q_train: List[Job] = field(default_factory=list, init=False)
     energy_joules: float = field(default=0.0, init=False)
     last_energy_time: float = field(default=0.0, init=False)
+    util_gpu_time: float = 0.0  # ∑ (busy_gpus * dt)  [GPU·s]
+    util_last_ts: float = 0.0  # mốc thời gian lần cuối cập nhật
+    util_begin_ts: float = 0.0  # mốc bắt đầu tính trung bình
 
     def __post_init__(self):
         assert self.default_freq in self.freq_levels, "default_freq phải thuộc freq_levels"
@@ -57,9 +60,28 @@ class DataCenter:
     def free_gpus(self) -> int:
         return self.total_gpus - self.busy_gpus
 
-    def accrue_energy(self, now: float):
-        from .energy_paper import instantaneous_power_w
-        dt = max(0.0, now - self.last_energy_time)
-        if dt > 0.0:
-            self.energy_joules += instantaneous_power_w(self) * dt
+    def instantaneous_power_w(self) -> float:
+        f = self.current_freq
+        gt = self.gpu_type
+        active = self.busy_gpus
+        idle = self.total_gpus - active
+        # Active: p_idle + p_peak * f^alpha
+        p_active = active * (gt.p_idle + gt.p_peak * (f ** gt.alpha))
+        # Idle: power-gating nếu cho phép
+        p_idle = idle * (gt.p_sleep if self.power_gating else gt.p_idle)
+        return p_active + p_idle
+
+    def accrue_energy(self, now: float,
+                      power_fn: Optional[Callable[['DataCenter'], float]] = None) -> None:
+        """
+        Tích lũy năng lượng: E += P(now) * dt.
+        - power_fn(dcenter) nếu có: dùng để tính công suất (paper-style, per-job f, v.v.)
+        - nếu không: fallback sang self.instantaneous_power_w() (baseline idle/sleep).
+        """
+        if getattr(self, "last_energy_time", 0.0) == 0.0:
             self.last_energy_time = now
+            return
+        dt = max(0.0, now - self.last_energy_time)
+        p = power_fn(self) if power_fn else self.instantaneous_power_w()
+        self.energy_joules += p * dt
+        self.last_energy_time = now

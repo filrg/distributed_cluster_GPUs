@@ -11,6 +11,10 @@ from .router import RouterPolicy, select_dc
 from .energy_paper import gpu_power_w, task_power_w
 from .learners import BanditDVFS
 from .freq_load_agg import TaskState, aggregate_with_atoms
+try:
+    from tqdm.auto import tqdm
+except Exception:
+    tqdm = None
 
 Event = Tuple[float, int, str, dict]
 
@@ -36,7 +40,8 @@ class MultiIngressPaperSimulator:
                  rng_seed: int = 42,
                  algo: str = "baseline",
                  power_cap: float = 0.0,
-                 control_interval: float = 5.0):
+                 control_interval: float = 5.0,
+                 show_progress: bool = True):
         self.now = 0.0
         self.end_time = sim_duration
         self.event_q: List[Event] = []
@@ -61,6 +66,22 @@ class MultiIngressPaperSimulator:
         self.power_cap = power_cap
         self.control_interval = control_interval
         self.bandit = BanditDVFS(init_explore=1, objective="energy") if algo == "bandit" else None
+
+        self.show_progress = bool(show_progress)
+        self._pbar = None
+        self._pbar_last_t = 0.0
+        if self.show_progress and tqdm is not None:
+            self._pbar = tqdm(
+                total=self.end_time,
+                desc="Sim time",
+                unit="s",
+                dynamic_ncols=True,
+                mininterval=0.2,   # hạn chế spam stdout
+                smoothing=0.3
+            )
+        elif self.show_progress and tqdm is None:
+            print("[info] tqdm chưa có. Cài: pip install tqdm (đã tự tắt progress).")
+            self.show_progress = False
 
         # schedule arrivals per ingress
         for ing in self.ingresses.values():
@@ -182,7 +203,11 @@ class MultiIngressPaperSimulator:
     # --- run loop ---
     def run(self):
         with open(self.cluster_log_path, 'w', newline='') as f:
-            csv.writer(f).writerow(["time_s","dc","freq","busy","free","run_total","run_inf","run_train","q_inf","q_train","power_W","energy_kJ"])
+            csv.writer(f).writerow(["time_s", "dc", "freq", "busy", "free",
+                                    "run_total", "run_inf", "run_train",
+                                    "q_inf", "q_train",
+                                    "util_inst", "util_avg",
+                                    "power_W", "energy_kJ"])
         with open(self.job_log_path, 'w', newline='') as f:
             csv.writer(f).writerow(["jid","ingress","type","size","dc","f_used","n_gpus",
                                     "net_lat_s","start_s","finish_s","latency_s","T_pred","P_pred","E_pred"])
@@ -194,8 +219,22 @@ class MultiIngressPaperSimulator:
             if t > self.end_time: break
 
             for dc in self.dcs.values():
-                dc.accrue_energy(t)
-
+                if dc.util_last_ts == 0.0:
+                    dc.util_last_ts = t
+                    dc.util_begin_ts = t
+                else:
+                    dt = max(0.0, t - dc.util_last_ts)
+                    dc.util_gpu_time += dc.busy_gpus * dt
+                    dc.util_last_ts = t
+                dc.accrue_energy(t, power_fn=lambda d, f=dc.current_freq: self._estimate_dc_power(d, f))
+            
+            # update progress bar with "simulated time advanced"
+            if self._pbar is not None:
+                delta = max(0.0, t - self._pbar_last_t)
+                if delta > 0.0:
+                    self._pbar.update(delta)
+                    self._pbar_last_t = t
+            
             self.now = t
             if etype == 'arrival_inf':
                 self._handle_ingress_arrival('inference', payload['ing'])
@@ -220,7 +259,17 @@ class MultiIngressPaperSimulator:
                 raise RuntimeError(f"Unknown event {etype}")
 
         for dc in self.dcs.values():
+            # cập nhật util đến end_time
+            if 0.0 < dc.util_last_ts < self.end_time:
+                dt = self.end_time - dc.util_last_ts
+                dc.util_gpu_time += dc.busy_gpus * dt
+                dc.util_last_ts = self.end_time
             dc.accrue_energy(self.end_time)
+        
+        if self._pbar is not None:
+            if self._pbar.n < self._pbar.total:
+                self._pbar.update(self._pbar.total - self._pbar.n)
+            self._pbar.close()
 
     # --- arrivals at ingress ---
     def _handle_ingress_arrival(self, jtype: str, ing_name: str):
@@ -416,11 +465,16 @@ class MultiIngressPaperSimulator:
                 run_total = len(dc.running_jobs)
                 run_inf = sum(1 for j,_ in dc.running_jobs.values() if j.jtype == 'inference')
                 run_trn = run_total - run_inf
+                util_inst = (dc.busy_gpus / dc.total_gpus) if dc.total_gpus else 0.0
+                elapsed = max(1e-9, self.now - (dc.util_begin_ts or self.now))
+                util_avg = (dc.util_gpu_time / (dc.total_gpus * elapsed)) if dc.total_gpus else 0.0
                 power_now = self._estimate_dc_power(dc, getattr(dc, "current_freq", 1.0))
+
                 w.writerow([f"{self.now:.3f}", name, f"{dc.current_freq:.2f}",
                             dc.busy_gpus, dc.free_gpus, run_total, run_inf, run_trn,
                             len(dc.q_inf), len(dc.q_train),
-                            f"{power_now:.2f}", f"{dc.energy_joules/1000.0:.4f}"])
+                            f"{util_inst:.4f}", f"{util_avg:.4f}",
+                            f"{power_now:.2f}", f"{dc.energy_joules / 1000.0:.4f}"])
         self._schedule(self.now + interval, 'log', {'interval': interval})
 
     def best_nf_grid(n_max: int, freq_levels,
