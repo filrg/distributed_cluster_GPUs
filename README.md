@@ -301,3 +301,20 @@ Chọn $n,f$ sao cho **min** $E\cdot\text{CI(dc)}$ **hoặc** $(E/3.6\text{e}6)\
 python run_sim_paper.py --algo carbon_cost \
   --duration 1200 --log-interval 5
 ```
+
+## Vẽ đồ thị
+
+Mỗi run (một cấu hình/thuật toán) để trong một thư mục có:
+
+* `cluster_log.csv`
+* `job_log.csv`
+
+Chạy:
+
+```bash
+python plot_sim_results.py --run baseline=./runs/baseline --run cap_greedy=./runs/cap_greedy --run carbon=./runs/carbon_cost --outdir ./figs --bin 5
+```
+
+* `NAME=DIR`: tên muốn hiển thị trên legend và thư mục chứa CSV. Ví dụ: baseline=./runs/baseline
+* `--outdir`: nơi lưu hình.
+* `--bin`: kích thước bin (giây) cho biểu đồ throughput.
