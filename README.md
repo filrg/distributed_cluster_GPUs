@@ -302,6 +302,16 @@ python run_sim_paper.py --algo carbon_cost \
   --duration 1200 --log-interval 5
 ```
 
+## Our algorithm
+
+```bash
+python run_sim_paper.py --algo eco_route --eco-objective energy --duration 1200 --log-interval 5
+```
+
+```bash
+python run_sim_paper.py --algo rl_energy --rl-alpha 0.1 --rl-gamma 0.0 --rl-eps 0.2 --rl-eps-decay 0.995 --rl-eps-min 0.02 --rl-n-cand 2 --duration 1200 --log-interval 5
+```
+
 ## Vẽ đồ thị
 
 Mỗi run (một cấu hình/thuật toán) để trong một thư mục có:

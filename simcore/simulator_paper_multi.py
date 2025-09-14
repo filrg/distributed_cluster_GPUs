@@ -3,14 +3,15 @@ from typing import Dict, List, Tuple, Optional, Union
 from .models import Job, DataCenter
 from .arrivals import ArrivalConfig
 from .policy import PolicyConfig, select_gpus_and_set_freq
-from .coeffs import TrainPowerCoeffs, TrainLatencyCoeffs
 from .latency_paper import step_time_s
 from .policy_paper import energy_tuple, best_nf_grid
 from .network import Ingress, Graph
 from .router import RouterPolicy, select_dc
-from .energy_paper import gpu_power_w, task_power_w
+from .energy_paper import task_power_w
 from .learners import BanditDVFS
 from .freq_load_agg import TaskState, aggregate_with_atoms
+from .learners_rl import RLEnergyAgent, RLAction
+
 try:
     from tqdm.auto import tqdm
 except Exception:
@@ -18,12 +19,14 @@ except Exception:
 
 Event = Tuple[float, int, str, dict]
 
+
 class MultiIngressPaperSimulator:
     """
     - Mỗi ingress có arrival riêng (inference & training).
     - Khi job đến ingress: route -> DC, cộng delay WAN rồi mới vào hàng đợi DC.
     - Data transfer time (đơn giản): t_net = Lnet + data_GB / bottleneck_Gbps (nếu biết).
     """
+
     def __init__(self,
                  ingresses: Dict[str, Ingress],
                  dcs: Dict[str, DataCenter],
@@ -41,7 +44,8 @@ class MultiIngressPaperSimulator:
                  algo: str = "baseline",
                  power_cap: float = 0.0,
                  control_interval: float = 5.0,
-                 show_progress: bool = True):
+                 show_progress: bool = True,
+                 rl_alpha=0.1, rl_gamma=0.0, rl_eps=0.2, rl_eps_decay=0.995, rl_eps_min=0.02, rl_n_cand=2):
         self.now = 0.0
         self.end_time = sim_duration
         self.event_q: List[Event] = []
@@ -63,6 +67,11 @@ class MultiIngressPaperSimulator:
         self.job_log_path = "job_log.csv"
 
         self.algo = algo
+        self.rl = None
+        self.rl_n_cand = int(rl_n_cand)
+        if self.algo == "rl_energy":
+            self.rl = RLEnergyAgent(alpha=rl_alpha, gamma=rl_gamma, eps=rl_eps,
+                                    eps_decay=rl_eps_decay, eps_min=rl_eps_min)
         self.power_cap = power_cap
         self.control_interval = control_interval
         self.bandit = BanditDVFS(init_explore=1, objective="energy") if algo == "bandit" else None
@@ -76,7 +85,7 @@ class MultiIngressPaperSimulator:
                 desc="Sim time",
                 unit="s",
                 dynamic_ncols=True,
-                mininterval=0.2,   # hạn chế spam stdout
+                mininterval=0.2,  # hạn chế spam stdout
                 smoothing=0.3
             )
         elif self.show_progress and tqdm is None:
@@ -138,44 +147,114 @@ class MultiIngressPaperSimulator:
             deficit -= best_dp
 
     def _control(self):
-        if self.algo not in ("cap_uniform", "cap_greedy"):
-            return
+        """
+        Power-cap controller:
+          - cap_uniform: hạ đồng loạt theo DC, mỗi bước chọn DC có ∆P lớn nhất.
+          - cap_greedy : hạ theo 'atoms' per-job (từ aggregate), tái-ước-lượng sau mỗi bước.
+        Có hysteresis nhỏ để tránh rung quanh power_cap.
+        """
+        # Chỉ chạy khi cần
         if self.power_cap <= 0:
             return
 
-        # Ước lượng tổng P hiện tại bằng mô hình paper (đã có _estimate_dc_power)
-        totalP = sum(self._estimate_dc_power(dc, dc.current_freq) for dc in self.dcs.values())
-        if totalP <= self.power_cap:
+        algo = getattr(self, "algo", "baseline")
+        if algo not in ("cap_uniform", "cap_greedy"):
+            # (tuỳ chọn) vài heuristic nhẹ cho các algo khác
+            if algo in ("eco_route", "carbon_cost"):
+                # hạ f về min khi DC rảnh để giảm idle power
+                for dc in self.dcs.values():
+                    if dc.busy_gpus == 0 and dc.freq_levels:
+                        dc.current_freq = min(dc.freq_levels)
             return
 
-        deficit = totalP - self.power_cap
+        # 1) Ước lượng tổng P hiện tại
+        totalP = 0.0
+        for dc in self.dcs.values():
+            f_now = getattr(dc, "current_freq", 1.0)
+            totalP += self._estimate_dc_power(dc, f_now)
 
-        if self.algo == "cap_uniform":
-            # giữ nguyên như version cũ: hạ đồng loạt theo DC, mỗi bước chọn ∆P lớn nhất
+        # Hysteresis: nếu đã dưới cap một chút thì thôi
+        cap_margin = getattr(self, "cap_margin", 5.0)  # W
+        if totalP <= self.power_cap - cap_margin:
+            return
+
+        # Thâm hụt cần cắt
+        deficit = max(0.0, totalP - self.power_cap)
+        if deficit <= 1e-6:
+            return
+
+        # 2) Nhánh cap_uniform: gọi hàm sẵn có
+        if algo == "cap_uniform":
             return self._cap_uniform(deficit)
 
-        # ---- cap_greedy: chọn 'atoms' per-job theo aggregate ----
-        tasks = []
-        for dc in self.dcs.values():
-            levels = dc.freq_levels
-            for job, g in dc.running_jobs.values():
-                pC, tC = self.coeffs_map[(dc.name, job.jtype)]
-                cur_f = getattr(job, "f_used", 0.0) or dc.current_freq
-                tasks.append(TaskState(job_id=job.jid, dc_name=dc.name, n=g, f=cur_f,
-                                       freq_levels=levels, p_coeffs=pC, t_coeffs=tC))
-        _, down_atoms = aggregate_with_atoms(tasks)
+        iter_guard = 10000  # van an toàn, tránh vòng vô tận
+        while deficit > 1e-6 and iter_guard > 0:
+            iter_guard -= 1
 
-        for atom in down_atoms:
-            if deficit <= 1e-6:
+            # 3.1 Gom tasks (bỏ qua DC không có freq_levels hoặc job đã ở f min)
+            tasks = []
+            for dc in self.dcs.values():
+                levels = getattr(dc, "freq_levels", None) or []
+                if not levels:
+                    continue
+                f_min = min(levels)
+                for job, g in list(dc.running_jobs.values()):
+                    pC, tC = self.coeffs_map[(dc.name, job.jtype)]
+                    cur_f = getattr(job, "f_used", 0.0) or dc.current_freq
+                    if cur_f <= f_min + 1e-12:
+                        continue  # không còn nấc để hạ
+                    tasks.append(TaskState(job_id=job.jid, dc_name=dc.name,
+                                           n=g, f=cur_f, freq_levels=levels,
+                                           p_coeffs=pC, t_coeffs=tC))
+
+            if not tasks:
                 break
-            dc = self.dcs[atom.dc_name]
-            tup = dc.running_jobs.get(atom.job_id)
-            if not tup:
-                continue
-            job, g = tup
-            # ÁP DỤNG BƯỚC: reschedule job với f_to
-            self._reschedule_job(dc, job, g, atom.f_to)
-            deficit -= atom.dP  # xấp xỉ; nếu muốn chính xác, ước lượng lại ∆P sau khi đổi f
+
+            # 3.2 Lấy danh sách atoms "đi xuống" đã sắp xếp theo ưu tiên (∆P/∆V) từ aggregate
+            try:
+                _, down_atoms = aggregate_with_atoms(tasks)
+            except Exception:
+                break
+            if not down_atoms:
+                break
+
+            applied_any = False
+
+            # 3.3 Áp dụng lần lượt atoms cho tới khi hết deficit
+            for atom in down_atoms:
+                if deficit <= 1e-6:
+                    break
+
+                dc = self.dcs.get(atom.dc_name)
+                if dc is None:
+                    continue
+                tup = dc.running_jobs.get(atom.job_id)
+                if not tup:
+                    continue
+
+                job, g = tup
+                cur_f = getattr(job, "f_used", dc.current_freq)
+                # Bỏ qua atoms "không đi xuống"
+                if atom.f_to >= cur_f - 1e-12:
+                    continue
+
+                # Thực hiện reschedule về f_to
+                self._reschedule_job(dc, job, g, atom.f_to)
+                applied_any = True
+
+                # 3.4 Tái-ước-lượng totalP CHÍNH XÁC sau khi đổi f
+                new_totalP = 0.0
+                for _dc in self.dcs.values():
+                    new_totalP += self._estimate_dc_power(_dc, getattr(_dc, "current_freq", 1.0))
+                totalP = new_totalP
+                deficit = max(0.0, totalP - self.power_cap)
+
+                if deficit <= 1e-6:
+                    break
+
+            # Nếu vòng này không áp dụng được atom nào → thoát
+            if not applied_any:
+                break
 
     def _job_rate_units_per_s(self, dc, job, gpus, f):
         # 1 unit công việc mất T_unit(n,f) giây ⇒ tốc độ (units/s) = 1 / T_unit
@@ -209,13 +288,13 @@ class MultiIngressPaperSimulator:
                                     "util_inst", "util_avg",
                                     "power_W", "energy_kJ"])
         with open(self.job_log_path, 'w', newline='') as f:
-            csv.writer(f).writerow(["jid","ingress","type","size","dc","f_used","n_gpus",
-                                    "net_lat_s","start_s","finish_s","latency_s","T_pred","P_pred","E_pred"])
+            csv.writer(f).writerow(["jid", "ingress", "type", "size", "dc", "f_used", "n_gpus",
+                                    "net_lat_s", "start_s", "finish_s", "latency_s", "T_pred", "P_pred", "E_pred"])
 
         while self.event_q:
             ev = self._pop()
             if ev is None: break
-            t,_,etype,payload = ev
+            t, _, etype, payload = ev
             if t > self.end_time: break
 
             for dc in self.dcs.values():
@@ -227,14 +306,14 @@ class MultiIngressPaperSimulator:
                     dc.util_gpu_time += dc.busy_gpus * dt
                     dc.util_last_ts = t
                 dc.accrue_energy(t, power_fn=lambda d, f=dc.current_freq: self._estimate_dc_power(d, f))
-            
+
             # update progress bar with "simulated time advanced"
             if self._pbar is not None:
                 delta = max(0.0, t - self._pbar_last_t)
                 if delta > 0.0:
                     self._pbar.update(delta)
                     self._pbar_last_t = t
-            
+
             self.now = t
             if etype == 'arrival_inf':
                 self._handle_ingress_arrival('inference', payload['ing'])
@@ -265,11 +344,54 @@ class MultiIngressPaperSimulator:
                 dc.util_gpu_time += dc.busy_gpus * dt
                 dc.util_last_ts = self.end_time
             dc.accrue_energy(self.end_time)
-        
+
         if self._pbar is not None:
             if self._pbar.n < self._pbar.total:
                 self._pbar.update(self._pbar.total - self._pbar.n)
             self._pbar.close()
+
+    def _net_tuple(self, src: str, dst: str, job) -> tuple[float, list[str], float, float, float]:
+        """
+        Trả về (Lnet_s, path, bottleneck_Gbps, path_cost_per_GB, transfer_s).
+        transfer_s = Lnet_s + (payload_GB / bottleneck_Gbps) nếu có bottleneck hữu hạn.
+        """
+        Lnet_s, path, bottleneck, cost_sum = self.graph.shortest_path_latency(src, dst)
+        # payload ước lượng theo loại job
+        data_gb = 0.05 if job.jtype == 'inference' else 5.0
+        if bottleneck and bottleneck > 0.0:
+            xfer_s = data_gb / bottleneck
+        else:
+            # Graph của bạn trả 0.0 nếu bottleneck là vô cực -> coi như không tính phần băng thông
+            xfer_s = 0.0
+        transfer_s = Lnet_s + xfer_s
+        return Lnet_s, path, bottleneck, cost_sum, transfer_s
+
+    def _rl_build_state(self, dc, job, net_lat_est: float) -> dict:
+        return {
+            "job_type": job.jtype,
+            "job_size": job.size,
+            "dc_total": dc.total_gpus,
+            "dc_busy": dc.busy_gpus,
+            "dc_q_inf": len(dc.q_inf),
+            "dc_q_trn": len(dc.q_train),
+            "net_lat": net_lat_est,
+            "f_levels_len": len(dc.freq_levels)
+        }
+
+    def _rl_actions_for_job(self, job) -> list[RLAction]:
+        acts = []
+        for dc in self.dcs.values():
+            if not dc.freq_levels:
+                continue
+            # lấy vài mức f tiêu biểu: min, median, max
+            f_levels = sorted(dc.freq_levels)
+            candidates_f = {f_levels[0], f_levels[-1], f_levels[len(f_levels) // 2]}
+            # ứng viên n: 1..rl_n_cand, cắt bởi free_gpus và policy.max_gpus_per_job
+            max_n = min(self.policy.max_gpus_per_job, dc.total_gpus)  # dùng total; lúc route chưa chắc free
+            for n in range(1, min(self.rl_n_cand, max_n) + 1):
+                for f in candidates_f:
+                    acts.append(RLAction(dc.name, n, f))
+        return acts
 
     # --- arrivals at ingress ---
     def _handle_ingress_arrival(self, jtype: str, ing_name: str):
@@ -277,21 +399,65 @@ class MultiIngressPaperSimulator:
         jid = next(self.jid_counter)
         size = self._sample_job_size(jtype)
         job = Job(jid=jid, jtype=jtype, size=size, arrival_time=self.now, dc_name=None)
-        # route
-        dc_name, Lnet, path, score = select_dc(ing, jtype, self.dcs, self.coeffs_map,
-                                               self.graph, self.carbon, self.router_policy)
-        # simple transfer time model
-        data_gb = 0.05 if jtype == 'inference' else 5.0
-        # bottleneck not returned here to keep simple; you can extend Graph to return it.
-        transfer_s = Lnet  # + data_gb / max(1e-6, bottleneck)  # bật khi có capacity
-        # schedule transfer completion
-        self._schedule(self.now + transfer_s, 'xfer_done',
-                       {'ing': ing_name, 'dc': dc_name, 'jid': jid, 'job': job, 'net_lat_s': Lnet})
 
-        # schedule next arrival at this ingress
-        ia = (self.arr_inf if jtype=='inference' else self.arr_trn).next_interarrival(self.now)
+        # ----- ROUTING: chọn DC theo algo -----
+        if self.algo == "eco_route":
+            best = None
+            for dc in self.dcs.values():
+                Lnet, path, bottleneck, cost_sum, transfer_s = self._net_tuple(ing_name, dc.name, job)
+                score, n_star, f_star = self._score_dc_for_job(dc, job)  # đã có trước
+                cand = (score, dc.name, Lnet, path, bottleneck, cost_sum, transfer_s, n_star, f_star)
+                if (best is None) or (cand[0] < best[0]):
+                    best = cand
+            _, dc_name, Lnet, path, bottleneck, cost_sum, transfer_s, n_star, f_star = best
+            job._eco_hint = (n_star, f_star)
+
+        elif self.algo == "rl_energy" and getattr(self, "rl", None) is not None:
+            # build state per-DC + liệt kê action {(dc,n,f)}, chọn epsilon-greedy
+            state_map = {}
+            for dc in self.dcs.values():
+                Lnet, path, bottleneck, cost_sum, transfer_s = self._net_tuple(ing_name, dc.name, job)
+                state_map[dc.name] = self._rl_build_state(dc, job, Lnet)
+
+            actions = self._rl_actions_for_job(job)
+            if actions:
+                a = self.rl.select_per_dc(state_map, actions)
+                job._rl_state0 = state_map[a.dc_name]
+                job._rl_action = a
+                dc_name = a.dc_name
+                Lnet, path, bottleneck, cost_sum, transfer_s = self._net_tuple(ing_name, dc_name, job)
+            else:
+                # fallback: router cũ
+                dc_name = list(self.dcs.keys())[0]
+                Lnet, path, bottleneck, cost_sum, transfer_s = self._net_tuple(ing_name, dc_name, job)
+                data_gb = 0.05 if job.jtype == 'inference' else 5.0
+                xfer_s = (data_gb / bottleneck) if bottleneck > 0.0 else 0.0
+                transfer_s = Lnet + xfer_s
+                dc_name = list(self.dcs.keys())[0]
+
+        else:
+            # baseline / cap_* / joint_nf / bandit / carbon_cost: dùng router cũ
+            # Lưu ý: chọn DC xong vẫn phải lấy path/latency qua Graph.shortest_path_latency
+            dc_name, Lnet, path, _score = select_dc(ing, jtype, self.dcs, self.coeffs_map,
+                                                    self.graph, self.carbon, self.router_policy)
+            # Nếu select_dc CHƯA trả Lnet theo Graph mới, thì cập nhật lại bằng Graph hiện tại:
+            Lnet, path, bottleneck, cost_sum, transfer_s = self._net_tuple(ing_name, dc_name, job)
+
+        # ----- LỊCH SỰ KIỆN chuyển tới DC -----
+        self._schedule(self.now + transfer_s, 'xfer_done', {
+            'ing': ing_name,
+            'dc': dc_name,
+            'jid': jid,
+            'job': job,
+            'net_lat_s': Lnet,
+            'net_bw_Gbps': bottleneck,
+            'net_path_cost_GB': cost_sum
+        })
+
+        # ----- LỊCH ARRIVAL TIẾP THEO ở ingress này -----
+        ia = (self.arr_inf if jtype == 'inference' else self.arr_trn).next_interarrival(self.now)
         self._schedule(self.now + ia,
-                       'arrival_inf' if jtype=='inference' else 'arrival_trn',
+                       'arrival_inf' if jtype == 'inference' else 'arrival_trn',
                        {'ing': ing_name})
 
     def _sample_job_size(self, jtype: str) -> float:
@@ -299,7 +465,7 @@ class MultiIngressPaperSimulator:
         if jtype == 'inference':
             xm, alpha = 0.02, 2.5
             u = max(1e-9, 1 - random.random())
-            return xm / (u ** (1/alpha))
+            return xm / (u ** (1 / alpha))
         mu, sigma = math.log(3.0), 0.6
         return max(0.1, random.lognormvariate(mu, sigma))
 
@@ -355,6 +521,12 @@ class MultiIngressPaperSimulator:
                         deadline_s=getattr(job, "deadline", None)
                     )
                 return self._start_job_with_nf(dc, job, n_star, f_star)
+            elif self.algo == "rl_energy" and hasattr(job, "_rl_action"):
+                a: RLAction = job._rl_action
+                # khớp với thực tế free_gpus
+                n = max(1, min(a.n, dc.free_gpus, self.policy.max_gpus_per_job))
+                f = a.f
+                return self._start_job_with_nf(dc, job, n, f)
             else:
                 gpus = select_gpus_and_set_freq(dc, job, self.policy)
                 if gpus > 0:
@@ -397,10 +569,26 @@ class MultiIngressPaperSimulator:
         f_used = getattr(job, "f_used", dc.current_freq)
         T_pred, P_pred, E_pred = energy_tuple(g, f_used, p_coeffs, t_coeffs)  # per-unit
 
+        if self.algo == "rl_energy" and (self.rl is not None) \
+                and hasattr(job, "_rl_action") and hasattr(job, "_rl_state0"):
+            E_job = E_pred * job.size
+            reward = -float(E_job)
+            ddl = getattr(job, "deadline", None)
+            if ddl is not None:
+                laten = max(0.0, (job.finish_time - job.start_time) - ddl)
+                reward -= 1000.0 * laten
+            wait = max(0.0, job.start_time - job.arrival_time)
+            reward -= 50.0 * wait
+
+            next_state = self._rl_build_state(dc, job, 0.0)
+            next_actions = self._rl_actions_for_job(job)  # γ=0 thì không dùng
+            self.rl.update(job._rl_state0, job._rl_action, reward, next_state, next_actions, done=True)
+
         with open(self.job_log_path, 'a', newline='') as f:
             csv.writer(f).writerow([
-                job.jid, job.dc_name, job.jtype, f"{job.size:.4f}", dc.name,
-                f"{f_used:.3f}", g, f"{getattr(job,'net_latency_s',0.0):.4f}",
+                job.jid, getattr(job, "ingress", ""),
+                job.jtype, f"{job.size:.4f}", dc.name,
+                f"{f_used:.3f}", g, f"{getattr(job, 'net_latency_s', 0.0):.4f}",
                 f"{job.start_time:.6f}", f"{job.finish_time:.6f}",
                 f"{(job.finish_time - job.start_time):.6f}",
                 f"{T_pred:.6f}", f"{P_pred:.2f}", f"{E_pred:.2f}"
@@ -463,7 +651,7 @@ class MultiIngressPaperSimulator:
             w = csv.writer(f)
             for name, dc in self.dcs.items():
                 run_total = len(dc.running_jobs)
-                run_inf = sum(1 for j,_ in dc.running_jobs.values() if j.jtype == 'inference')
+                run_inf = sum(1 for j, _ in dc.running_jobs.values() if j.jtype == 'inference')
                 run_trn = run_total - run_inf
                 util_inst = (dc.busy_gpus / dc.total_gpus) if dc.total_gpus else 0.0
                 elapsed = max(1e-9, self.now - (dc.util_begin_ts or self.now))
@@ -477,41 +665,11 @@ class MultiIngressPaperSimulator:
                             f"{power_now:.2f}", f"{dc.energy_joules / 1000.0:.4f}"])
         self._schedule(self.now + interval, 'log', {'interval': interval})
 
-    def best_nf_grid(n_max: int, freq_levels,
-                     p_coeffs: TrainPowerCoeffs, t_coeffs: TrainLatencyCoeffs,
-                     objective: str = "energy",  # "energy" | "carbon"
-                     carbon_intensity: float = 0.0,  # gCO2/kWh (tương đối cũng được)
-                     deadline_s: float | None = None):
-        """
-        Trả về (n*, f*, T*, P*, E*). f_levels là list float (đã chuẩn hóa như đang dùng).
-        """
-        best = None
-        for n in range(1, max(1, int(n_max)) + 1):
-            for f in freq_levels:
-                T = step_time_s(n, f, t_coeffs)  # s per unit
-                P = n * gpu_power_w(f, p_coeffs)  # W
-                E = P * T  # J per unit
-                if deadline_s is not None and T > deadline_s:
-                    continue
-                score = E if objective == "energy" else (E * carbon_intensity)
-                cand = (score, n, f, T, P, E)
-                if (best is None) or (cand[0] < best[0]):
-                    best = cand
-        if best is None:
-            # fallback: dùng n=1, f=max
-            fmax = max(freq_levels)
-            T = step_time_s(1, fmax, t_coeffs);
-            P = gpu_power_w(fmax, p_coeffs);
-            E = P * T
-            return (1, fmax, T, P, E)
-        _, n, f, T, P, E = best
-        return (n, f, T, P, E)
-
     def _start_job_with_nf(self, dc, job, n, f):
         # cấp phát
         n = max(1, min(n, dc.free_gpus))
         if n <= 0:
-            (dc.q_inf if job.jtype == 'inference' else dc.q_train).append(job);
+            (dc.q_inf if job.jtype == 'inference' else dc.q_train).append(job)
             return
         dc.busy_gpus += n
         dc.running_jobs[job.jid] = (job, n)
@@ -553,3 +711,37 @@ class MultiIngressPaperSimulator:
             return float(dc_map.get(h, 0.0))
 
         return 0.0
+
+    def _score_dc_for_job(self, dc, job) -> tuple:
+        """
+        Trả về (score, n_star, f_star) cho job nếu chạy ở dc theo eco-objective.
+        score đơn vị:
+          - energy: Joule/job
+          - carbon: gCO2/job
+          - cost: USD/job
+        """
+        pC, tC = self.coeffs_map[(dc.name, job.jtype)]
+        obj = getattr(self, "eco_objective", "energy")
+        ddl = getattr(job, "deadline", None)
+
+        # Carbon / price lấy từ state đã có
+        CI = self.carbon.get(dc.name, 0.0)
+        price = self._price_kwh(dc.name) if hasattr(self, "_price_kwh") else 0.0
+
+        # chọn (n,f) tốt nhất cho mục tiêu
+        if obj == "energy":
+            n, f, T, P, E_unit = best_nf_grid(self.policy.max_gpus_per_job, dc.freq_levels, pC, tC,
+                                              objective="energy", deadline_s=ddl)
+            score = E_unit * job.size  # J / job
+
+        elif obj == "carbon":
+            n, f, T, P, E_unit = best_nf_grid(self.policy.max_gpus_per_job, dc.freq_levels, pC, tC,
+                                              objective="carbon", carbon_intensity=CI, deadline_s=ddl)
+            score = (E_unit * job.size) / 3.6e6 * CI  # kWh * gCO2/kWh = gCO2
+
+        else:  # cost
+            n, f, T, P, E_unit = best_nf_grid(self.policy.max_gpus_per_job, dc.freq_levels, pC, tC,
+                                              objective="cost", price_kwh=price, deadline_s=ddl)
+            score = (E_unit * job.size) / 3.6e6 * price  # USD
+
+        return score, n, f

@@ -69,8 +69,8 @@ def best_nf_grid(n_max: int, freq_levels,
     if best is None:
         # fallback: dùng n=1, f=max
         fmax = max(freq_levels)
-        T = step_time_s(1, fmax, t_coeffs);
-        P = gpu_power_w(fmax, p_coeffs);
+        T = step_time_s(1, fmax, t_coeffs)
+        P = gpu_power_w(fmax, p_coeffs)
         E = P * T
         return 1, fmax, T, P, E
     _, n, f, T, P, E = best

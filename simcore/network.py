@@ -3,11 +3,13 @@ import math
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
+
 @dataclass(frozen=True)
 class Ingress:
     """Biểu diễn cổng vào (POP/edge gateway)."""
     name: str
     region: str
+
 
 @dataclass
 class Edge:
@@ -16,14 +18,17 @@ class Edge:
     capacity_gbps: float = math.inf
     cost_per_GB: float = 0.0  # egress cost cộng dồn theo path
 
+
 class Graph:
     """Đồ thị có hướng cho WAN; node = tên (Ingress/DC)."""
+
     def __init__(self):
         self.adj: Dict[str, List[Edge]] = {}
 
     def add_edge(self, u: str, v: str, latency_ms: float,
                  capacity_gbps: float = math.inf, cost_per_GB: float = 0.0):
         self.adj.setdefault(u, []).append(Edge(v, latency_ms, capacity_gbps, cost_per_GB))
+
 
     def shortest_path_latency(self, src: str, dst: str) -> Tuple[float, List[str], float, float]:
         """Trả về (latency_s, path_nodes, bottleneck_Gbps, sum_cost_per_GB). Dijkstra theo latency."""

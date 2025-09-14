@@ -84,25 +84,25 @@ def build_ingresses_and_topology():
     # WAN graph
     g = Graph()
     # Kết nối ingress <-> DC (latency minh họa, ms)
-    g.add_edge("gw-west", "us-west", 15);
+    g.add_edge("gw-west", "us-west", 15)
     g.add_edge("us-west", "gw-west", 15)
-    g.add_edge("gw-west", "eu-central", 90);
+    g.add_edge("gw-west", "eu-central", 90)
     g.add_edge("eu-central", "gw-west", 90)
-    g.add_edge("gw-west", "ap-southeast", 140);
+    g.add_edge("gw-west", "ap-southeast", 140)
     g.add_edge("ap-southeast", "gw-west", 140)
 
-    g.add_edge("gw-eu", "eu-central", 12);
+    g.add_edge("gw-eu", "eu-central", 12)
     g.add_edge("eu-central", "gw-eu", 12)
-    g.add_edge("gw-eu", "us-west", 95);
+    g.add_edge("gw-eu", "us-west", 95)
     g.add_edge("us-west", "gw-eu", 95)
-    g.add_edge("gw-eu", "ap-southeast", 170);
+    g.add_edge("gw-eu", "ap-southeast", 170)
     g.add_edge("ap-southeast", "gw-eu", 170)
 
-    g.add_edge("gw-ap", "ap-southeast", 10);
+    g.add_edge("gw-ap", "ap-southeast", 10)
     g.add_edge("ap-southeast", "gw-ap", 10)
-    g.add_edge("gw-ap", "eu-central", 160);
+    g.add_edge("gw-ap", "eu-central", 160)
     g.add_edge("eu-central", "gw-ap", 160)
-    g.add_edge("gw-ap", "us-west", 130);
+    g.add_edge("gw-ap", "us-west", 130)
     g.add_edge("us-west", "gw-ap", 130)
 
     return ingresses, g

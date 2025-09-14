@@ -73,7 +73,8 @@ def parse_args():
     p.add_argument("--algo", type=str, default="baseline",
                    choices=[
                        "baseline", "cap_uniform", "cap_greedy",
-                       "joint_nf", "bandit", "carbon_cost"
+                       "joint_nf", "bandit", "carbon_cost",
+                       "eco_route", "rl_energy"
                    ])
     p.add_argument(
         "--power-cap", type=float, default=0.0,
@@ -84,6 +85,17 @@ def parse_args():
         help="Chu kỳ kích hoạt controller (giây). "
              "Dùng cho cap_* và có thể dùng cho carbon_cost nếu muốn downclock theo giờ/giá."
     )
+    p.add_argument("--eco-objective", type=str, default="energy",
+                   choices=["energy", "carbon", "cost"],
+                   help="Mục tiêu cho eco_route: energy = min năng lượng; carbon = min E*CI; cost = min E*kWh*price.")
+    # Hyperparams RL
+    p.add_argument("--rl-alpha", type=float, default=0.1, help="Tốc độ học Q-learning (α).")
+    p.add_argument("--rl-gamma", type=float, default=0.0, help="Hệ số chiết khấu (γ). 0.0 = contextual (1-step).")
+    p.add_argument("--rl-eps", type=float, default=0.2, help="Xác suất khám phá ε (epsilon-greedy).")
+    p.add_argument("--rl-eps-decay", type=float, default=0.995, help="Hệ số giảm ε mỗi lần cập nhật.")
+    p.add_argument("--rl-eps-min", type=float, default=0.02, help="Ngưỡng dưới của ε.")
+    p.add_argument("--rl-n-cand", type=int, default=2,
+                   help="Số mức n (GPU per job) ứng viên để agent chọn (1..n_cand).")
 
     return p.parse_args()
 
@@ -113,7 +125,11 @@ def main():
         policy=policy, sim_duration=args.duration,
         log_interval=args.log_interval, rng_seed=args.seed,
         algo=args.algo, power_cap=args.power_cap, control_interval=args.control_interval,
-        show_progress=args.progress
+        show_progress=args.progress,
+        # RL params
+        rl_alpha=args.rl_alpha, rl_gamma=args.rl_gamma,
+        rl_eps=args.rl_eps, rl_eps_decay=args.rl_eps_decay, rl_eps_min=args.rl_eps_min,
+        rl_n_cand=args.rl_n_cand
     )
     sim.run()
     print(f"Done. ({args.algo}) Logs: cluster_log.csv, job_log.csv")
