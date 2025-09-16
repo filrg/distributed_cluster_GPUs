@@ -1,4 +1,4 @@
-import csv, heapq, itertools, random
+import csv, heapq, itertools, random, os
 from typing import Dict, List, Tuple, Optional, Union
 from .models import Job, DataCenter
 from .arrivals import ArrivalConfig
@@ -40,6 +40,7 @@ class MultiIngressPaperSimulator:
                  policy: PolicyConfig = None,
                  sim_duration: float = 3600.0,
                  log_interval: float = 10.0,
+                 log_path: str = None,
                  rng_seed: int = 42,
                  algo: str = "baseline",
                  power_cap: float = 0.0,
@@ -65,6 +66,11 @@ class MultiIngressPaperSimulator:
 
         self.cluster_log_path = "cluster_log.csv"
         self.job_log_path = "job_log.csv"
+        if log_path:
+            out_dir = os.path.join(log_path, algo)
+            os.makedirs(out_dir, exist_ok=True)
+            self.cluster_log_path = os.path.join(out_dir, "cluster_log.csv")
+            self.job_log_path = os.path.join(out_dir, "job_log.csv")
 
         self.algo = algo
         self.rl = None
@@ -463,10 +469,10 @@ class MultiIngressPaperSimulator:
     def _sample_job_size(self, jtype: str) -> float:
         import math, random
         if jtype == 'inference':
-            xm, alpha = 0.02, 2.5
+            xm, alpha = 0.02, 2.01 # 0.02, 2.5 - alpha < 2 -> infinite variance?
             u = max(1e-9, 1 - random.random())
             return xm / (u ** (1 / alpha))
-        mu, sigma = math.log(3.0), 0.6
+        mu, sigma = math.log(200), 0.8 # math.log(3.0), 0.6
         return max(0.1, random.lognormvariate(mu, sigma))
 
     # --- after WAN transfer ---

@@ -29,6 +29,10 @@ def parse_args():
         help="Chu kỳ ghi log cluster/job (giây). Nên ≥ 1.0 để log gọn."
     )
     p.add_argument(
+        "--log-path", type=str, default=None,
+        help="Log path"
+    )
+    p.add_argument(
         "--seed", type=int, default=123,
         help="Random seed."
     )
@@ -123,7 +127,8 @@ def main():
         arrival_inf=arrival_inf, arrival_train=arrival_trn,
         router_policy=router, coeffs_map=coeffs, carbon_intensity=carbon, energy_price=price,
         policy=policy, sim_duration=args.duration,
-        log_interval=args.log_interval, rng_seed=args.seed,
+        log_interval=args.log_interval, log_path=args.log_path,
+        rng_seed=args.seed,
         algo=args.algo, power_cap=args.power_cap, control_interval=args.control_interval,
         show_progress=args.progress,
         # RL params

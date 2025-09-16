@@ -28,11 +28,11 @@ def build_dcs():
 
     return {
         "us-west": DataCenter("us-west", gpu_type=H100_PCIe, total_gpus=32,
-                              freq_levels=[0.6, 0.8, 1.0], default_freq=1.0, power_gating=True),
+                              freq_levels=[0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0], default_freq=1.0, power_gating=True),
         "eu-central": DataCenter("eu-central", gpu_type=A100_PCIe, total_gpus=24,
-                                 freq_levels=[0.5, 0.7, 1.0], default_freq=1.0, power_gating=True),
+                                 freq_levels=[0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0], default_freq=1.0, power_gating=True),
         "ap-southeast": DataCenter("ap-southeast", gpu_type=L4, total_gpus=48,
-                                   freq_levels=[0.5, 0.75, 1.0], default_freq=1.0, power_gating=True),
+                                   freq_levels=[0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0], default_freq=1.0, power_gating=True),
     }
 
 
