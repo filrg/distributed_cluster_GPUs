@@ -120,6 +120,13 @@ def plot_total_energy_bar(agg_dict: Dict[str, pd.DataFrame], outpath: str):
     plt.figure()
     positions = np.arange(len(names))
     plt.bar(positions, totals)
+
+    for pos, total in zip(positions, totals):
+        plt.text(
+            pos, total, f"{total:.1f}",
+            ha="center", va="bottom", fontsize=9
+        )
+
     plt.xticks(positions, names, rotation=20)
     plt.ylabel("Total energy (kJ)")
     plt.title("Final total energy per run")
