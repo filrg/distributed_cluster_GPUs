@@ -7,10 +7,11 @@ from .latency_paper import step_time_s
 from .policy_paper import energy_tuple, best_nf_grid
 from .network import Ingress, Graph
 from .router import RouterPolicy, select_dc
-from .energy_paper import task_power_w
+from .energy_paper import task_power_w, gpu_power_w
 from .learners import BanditDVFS
 from .freq_load_agg import TaskState, aggregate_with_atoms
-from .learners_rl import RLEnergyAgent, RLAction
+from .learners_rl import RLEnergyAgent
+from .learners_rl_adv import RLEnergyAgentAdv, RLAction
 
 try:
     from tqdm.auto import tqdm
@@ -46,7 +47,8 @@ class MultiIngressPaperSimulator:
                  power_cap: float = 0.0,
                  control_interval: float = 5.0,
                  show_progress: bool = True,
-                 rl_alpha=0.1, rl_gamma=0.0, rl_eps=0.2, rl_eps_decay=0.995, rl_eps_min=0.02, rl_n_cand=2):
+                 rl_alpha=0.1, rl_gamma=0.0, rl_eps=0.2, rl_eps_decay=0.995, rl_eps_min=0.02, rl_n_cand=2,
+                 rl_tau=0.1, rl_clip_grad=5.0, rl_baseline_beta=0.01):
         self.now = 0.0
         self.end_time = sim_duration
         self.event_q: List[Event] = []
@@ -78,6 +80,12 @@ class MultiIngressPaperSimulator:
         if self.algo == "rl_energy":
             self.rl = RLEnergyAgent(alpha=rl_alpha, gamma=rl_gamma, eps=rl_eps,
                                     eps_decay=rl_eps_decay, eps_min=rl_eps_min)
+        elif self.algo == "rl_energy_adv":
+            self.rl = RLEnergyAgentAdv(alpha=rl_alpha, gamma=rl_gamma,
+                                       tau=getattr(self, "rl_tau", 0.1) if hasattr(self, "rl_tau") else 0.1,
+                                       eps=rl_eps, eps_decay=rl_eps_decay, eps_min=rl_eps_min,
+                                       clip_grad=getattr(self, "rl_clip_grad", 5.0) if hasattr(self, "rl_clip_grad") else 5.0,
+                                       baseline_beta=getattr(self, "rl_baseline_beta", 0.01) if hasattr(self, "rl_baseline_beta") else 0.01)
         self.power_cap = power_cap
         self.control_interval = control_interval
         self.bandit = BanditDVFS(init_explore=1, objective="energy") if algo == "bandit" else None
@@ -396,6 +404,12 @@ class MultiIngressPaperSimulator:
             max_n = min(self.policy.max_gpus_per_job, dc.total_gpus)  # dùng total; lúc route chưa chắc free
             for n in range(1, min(self.rl_n_cand, max_n) + 1):
                 for f in candidates_f:
+                    ddl = getattr(job, "deadline", None)
+                    if ddl is not None:
+                        tC = self.coeffs_map[(dc.name, job.jtype)][1]
+                        T_unit = step_time_s(n, f, tC)
+                        if T_unit > ddl:
+                            continue
                     acts.append(RLAction(dc.name, n, f))
         return acts
 
@@ -440,7 +454,40 @@ class MultiIngressPaperSimulator:
                 xfer_s = (data_gb / bottleneck) if bottleneck > 0.0 else 0.0
                 transfer_s = Lnet + xfer_s
                 dc_name = list(self.dcs.keys())[0]
+        elif self.algo == "rl_energy_adv" and getattr(self, "rl", None) is not None:
+            # Build state per-DC (base) + augment per-action (t_unit/p_est/e_unit, price/carbon/cap_headroom)
+            base_map = {}
+            for dc in self.dcs.values():
+                Lnet, path, bottleneck, cost_sum, transfer_s_tmp = self._net_tuple(ing_name, dc.name, job)
+                base = self._rl_build_state(dc, job, Lnet)
+                base["price_kwh"] = self._price_kwh(dc.name)
+                base["carbon_g_per_kwh"] = self.carbon.get(dc.name, 0.0)
+                cap_headroom = max(0.0, self.power_cap - self._estimate_dc_power(dc, getattr(dc, "current_freq",
+                                                                                             1.0))) if self.power_cap > 0 else 0.0
+                base["cap_headroom_W"] = cap_headroom
+                base_map[dc.name] = base
 
+            actions = self._rl_actions_for_job(job)
+            if actions:
+                # augment state theo từng action
+                state_map = {}
+                for a in actions:
+                    s = dict(base_map[a.dc_name])
+                    pC, tC = self.coeffs_map[(a.dc_name, job.jtype)]
+                    T_unit = step_time_s(a.n, a.f, tC)
+                    P_est = a.n * gpu_power_w(a.f, pC)
+                    s["t_unit"] = T_unit
+                    s["p_est"] = P_est
+                    s["e_unit"] = P_est * T_unit
+                    state_map[a.dc_name] = s
+                a = self.rl.select_per_dc(state_map, actions)
+                job._rl_state0 = state_map[a.dc_name]
+                job._rl_action = a
+                dc_name = a.dc_name
+                Lnet, path, bottleneck, cost_sum, transfer_s = self._net_tuple(ing_name, dc_name, job)
+            else:
+                dc_name = list(self.dcs.keys())[0]
+                Lnet, path, bottleneck, cost_sum, transfer_s = self._net_tuple(ing_name, dc_name, job)
         else:
             # baseline / cap_* / joint_nf / bandit / carbon_cost: dùng router cũ
             # Lưu ý: chọn DC xong vẫn phải lấy path/latency qua Graph.shortest_path_latency
@@ -462,9 +509,7 @@ class MultiIngressPaperSimulator:
 
         # ----- LỊCH ARRIVAL TIẾP THEO ở ingress này -----
         ia = (self.arr_inf if jtype == 'inference' else self.arr_trn).next_interarrival(self.now)
-        self._schedule(self.now + ia,
-                       'arrival_inf' if jtype == 'inference' else 'arrival_trn',
-                       {'ing': ing_name})
+        self._schedule(self.now + ia, 'arrival_inf' if jtype == 'inference' else 'arrival_trn', {'ing': ing_name})
 
     def _sample_job_size(self, jtype: str) -> float:
         import math, random
@@ -533,6 +578,11 @@ class MultiIngressPaperSimulator:
                 n = max(1, min(a.n, dc.free_gpus, self.policy.max_gpus_per_job))
                 f = a.f
                 return self._start_job_with_nf(dc, job, n, f)
+            elif self.algo == "rl_energy_adv" and hasattr(job, "_rl_action"):
+                a: RLAction = job._rl_action
+                n = max(1, min(a.n, dc.free_gpus, self.policy.max_gpus_per_job))
+                f = a.f
+                return self._start_job_with_nf(dc, job, n, f)
             else:
                 gpus = select_gpus_and_set_freq(dc, job, self.policy)
                 if gpus > 0:
@@ -575,7 +625,7 @@ class MultiIngressPaperSimulator:
         f_used = getattr(job, "f_used", dc.current_freq)
         T_pred, P_pred, E_pred = energy_tuple(g, f_used, p_coeffs, t_coeffs)  # per-unit
 
-        if self.algo == "rl_energy" and (self.rl is not None) \
+        if self.algo in ("rl_energy", "rl_energy_adv") and (self.rl is not None) \
                 and hasattr(job, "_rl_action") and hasattr(job, "_rl_state0"):
             E_job = E_pred * job.size
             reward = -float(E_job)
@@ -585,9 +635,12 @@ class MultiIngressPaperSimulator:
                 reward -= 1000.0 * laten
             wait = max(0.0, job.start_time - job.arrival_time)
             reward -= 50.0 * wait
-
+            if self.power_cap > 0:
+                P_now = self._estimate_dc_power(self.dcs[dc_name], getattr(self.dcs[dc_name], "current_freq", 1.0))
+                overflow = max(0.0, P_now - self.power_cap)
+                reward -= 0.1 * overflow
             next_state = self._rl_build_state(dc, job, 0.0)
-            next_actions = self._rl_actions_for_job(job)  # γ=0 thì không dùng
+            next_actions = self._rl_actions_for_job(job)
             self.rl.update(job._rl_state0, job._rl_action, reward, next_state, next_actions, done=True)
 
         with open(self.job_log_path, 'a', newline='') as f:
