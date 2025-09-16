@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-def load_run(dir_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def load_run(dir_path: str, scaledown: int = 1) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Load cluster_log.csv and job_log.csv from dir_path."""
     cl_path = os.path.join(dir_path, "cluster_log.csv")
     jb_path = os.path.join(dir_path, "job_log.csv")
@@ -16,6 +16,11 @@ def load_run(dir_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         raise FileNotFoundError(f"Missing job_log.csv in {dir_path}")
     cl = pd.read_csv(cl_path)
     jb = pd.read_csv(jb_path)
+
+    if scaledown > 1:
+        cl = cl.iloc[::scaledown, :].reset_index(drop=True)
+        jb = jb.iloc[::scaledown, :].reset_index(drop=True)
+
     return cl, jb
 
 
@@ -166,6 +171,7 @@ def main():
                          "Ví dụ: baseline=./runs/baseline (có thể dùng nhiều --run)")
     ap.add_argument("--outdir", type=str, default="./figs", help="Thư mục output để lưu các hình.")
     ap.add_argument("--bin", type=float, default=5.0, help="Kích thước bin (giây) cho throughput.")
+    ap.add_argument("--scaledown", type=int, default=1, help="Bước nhảy khi đọc hàng trong log. Dùng khi muốn downsample.")
     args = ap.parse_args()
 
     if not args.run:
@@ -181,7 +187,7 @@ def main():
         if "=" not in spec:
             raise SystemExit(f"Run '{spec}' không hợp lệ. Dùng NAME=DIR.")
         name, d = spec.split("=", 1)
-        cl, jb = load_run(d)
+        cl, jb = load_run(d, scaledown=args.scaledown)
         cluster_by_run[name] = cl
         jobs_by_run[name] = jb
         agg_by_run[name] = aggregate_cluster(cl)
