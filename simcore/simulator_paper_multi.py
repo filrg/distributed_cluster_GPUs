@@ -1,10 +1,10 @@
 import csv, heapq, itertools, random, os
 from typing import Dict, List, Tuple, Optional, Union
-from .models import Job, DataCenter
+from .models import Job, DataCenter, PreemptedJob
 from .arrivals import ArrivalConfig
 from .policy import PolicyConfig, select_gpus_and_set_freq
 from .latency_paper import step_time_s
-from .policy_paper import energy_tuple, best_nf_grid
+from .policy_paper import energy_tuple, best_nf_grid, best_energy_freq
 from .network import Ingress, Graph
 from .router import RouterPolicy, select_dc
 from .energy_paper import task_power_w, gpu_power_w
@@ -44,6 +44,7 @@ class MultiIngressPaperSimulator:
                  log_path: str = None,
                  rng_seed: int = 42,
                  algo: str = "baseline",
+                 elastic_scaling: bool = False,
                  power_cap: float = 0.0,
                  control_interval: float = 5.0,
                  show_progress: bool = True,
@@ -75,6 +76,7 @@ class MultiIngressPaperSimulator:
             self.job_log_path = os.path.join(out_dir, "job_log.csv")
 
         self.algo = algo
+        self.elastic_scaling = elastic_scaling and self.algo in ("rl_energy", "rl_energy_adv")
         self.rl = None
         self.rl_n_cand = int(rl_n_cand)
         if self.algo == "rl_energy":
@@ -120,6 +122,79 @@ class MultiIngressPaperSimulator:
 
     def _pop(self):
         return heapq.heappop(self.event_q) if self.event_q else None
+
+    def _preempt_job(self, dc: DataCenter, job: Job, reason: str):
+        if job.jid not in dc.running_jobs:
+            return
+        job, gpus = dc.running_jobs.pop(job.jid)
+        self._advance_progress_to_now(dc, job, gpus)
+
+        preempt_ckpt = {
+            "units_done": job.units_done,
+            "f_used": job.f_used,
+            "gpus_assigned": gpus,
+        }
+        preempted = PreemptedJob(
+            job=job,
+            preempt_time=self.now,
+            reason=reason,
+            preempt_ckpt=preempt_ckpt
+        )
+        dc.preempted_jobs.append(preempted)
+
+        dc.busy_gpus -= gpus
+        job.preempt_count += 1
+
+    def _resume_preempted_job(self, dc: DataCenter, preempted: PreemptedJob, n_resume, f_resume):
+        job = preempted.job
+        if dc.free_gpus < n_resume:
+            return False
+        # Ckpt restore
+        job.units_done = preempted.preempt_ckpt["units_done"]
+        job.f_used = f_resume # job.f_used = preempted.preempt_ckpt["f_used"]
+        job.last_update = self.now
+
+        preempt_duration = self.now - preempted.preempt_time
+        job.total_preempt_time += preempt_duration
+        # Resume
+        dc.busy_gpus += n_resume #dc.busy_gpus += job.gpus_assigned
+        dc.running_jobs[job.jid] = (job, n_resume)
+
+        units_left = max(0.0, job.units_total - job.units_done)
+        p_coeffs, t_coeffs = self.coeffs_map[(dc.name, job.jtype)]
+        T_unit = step_time_s(job.gpus_assigned, job.f_used, t_coeffs)
+        finish_time = units_left / max(1.0 / T_unit, 1e-9)
+
+        job.ev_gen += 1
+        self._schedule(self.now + finish_time, "job_finish",
+                       {'dc': dc.name, 'jid': job.jid, 'gen': job.ev_gen})
+        dc.preempted_jobs.remove(preempted)
+        #print(f"Resume job {job.jid} at {self._current_hour()}.")
+
+    def _should_reallocation(self, dc: DataCenter, job_type: str) -> bool:
+        """Re-allocate on train completion (only with elastic_scaling)"""
+        if job_type != "training":
+            return False
+        # if self.algo not in ("rl_energy", "rl_energy_adv"):
+        #     return False
+
+        num_running_train_jobs = sum(1 for job, _ in dc.running_jobs.values() if job.jtype == "training")
+        return self.elastic_scaling and num_running_train_jobs > 1
+
+    def _preempt_all_training_jobs(self, dc: DataCenter, reason: str) -> List[PreemptedJob]:
+        """Preempted all training jobs and return list of it"""
+        preempted_jobs = []
+        running_train_jobs = []
+        # find all running training jobs
+        for jid, (job, gpus) in list(dc.running_jobs.items()):
+            if job.jtype == "training":
+                running_train_jobs.append((jid, job, gpus))
+        # preempt one by one
+        for jid, job, gpus in running_train_jobs:
+            self._preempt_job(dc, job, reason)
+            preempted = next((p for p in dc.preempted_jobs if p.job.jid == jid), None)
+            if preempted: preempted_jobs.append(preempted)
+        return preempted_jobs
 
     def _estimate_dc_power(self, dc: DataCenter, f: float) -> float:
         # Active (paper model)
@@ -303,7 +378,7 @@ class MultiIngressPaperSimulator:
                                     "power_W", "energy_kJ"])
         with open(self.job_log_path, 'w', newline='') as f:
             csv.writer(f).writerow(["jid", "ingress", "type", "size", "dc", "f_used", "n_gpus",
-                                    "net_lat_s", "start_s", "finish_s", "latency_s", "T_pred", "P_pred", "E_pred"])
+                                    "net_lat_s", "start_s", "finish_s", "latency_s", "preempt_count", "T_pred", "P_pred", "E_pred"])
 
         while self.event_q:
             ev = self._pop()
@@ -380,6 +455,7 @@ class MultiIngressPaperSimulator:
         transfer_s = Lnet_s + xfer_s
         return Lnet_s, path, bottleneck, cost_sum, transfer_s
 
+    # TODO
     def _rl_build_state(self, dc, job, net_lat_est: float) -> dict:
         return {
             "job_type": job.jtype,
@@ -412,6 +488,65 @@ class MultiIngressPaperSimulator:
                             continue
                     acts.append(RLAction(dc.name, n, f))
         return acts
+
+    def _rl_reallocate_training_jobs(self, dc: DataCenter, preempted_jobs: List[PreemptedJob]):
+        if self.algo not in ("rl_energy", "rl_energy_adv") or not self.rl:
+            return
+
+        for preempted_job in preempted_jobs:
+            job = preempted_job.job
+            
+            if self.algo == "rl_energy":
+                state_map = {
+                    dc.name: self._rl_build_state(dc, job, 0.0)
+                }
+                actions = self._rl_actions_for_job(job)
+                if actions:
+                    a = self.rl.select_per_dc(state_map, actions)
+                    job._rl_state0 = state_map[a.dc_name]
+                    job._rl_action = a
+                    n_rl = a.n
+                    f_rl = a.f
+                else:
+                    # Fallback to best energy frequency
+                    pC, tC = self.coeffs_map[(dc.name, job.jtype)]
+                    n_rl = 1  # Default to 1 GPU
+                    f_rl = best_energy_freq(n_rl, dc.freq_levels, pC, tC)
+                    
+            elif self.algo == "rl_energy_adv":
+                base_state = self._rl_build_state(dc, job, 0.0)
+                base_state["price_kwh"] = self._price_kwh(dc.name)
+                base_state["carbon_g_per_kwh"] = self.carbon.get(dc.name, 0.0)
+                cap_headroom = max(0.0, self.power_cap - self._estimate_dc_power(dc, getattr(dc, "current_freq", 1.0))) if self.power_cap > 0 else 0.0
+                base_state["cap_headroom_W"] = cap_headroom
+                
+                actions = self._rl_actions_for_job(job)
+                if actions:
+                    # Augment state for each action
+                    state_map = {}
+                    for a in actions:
+                        s = dict(base_state)
+                        pC, tC = self.coeffs_map[(dc.name, job.jtype)]
+                        T_unit = step_time_s(a.n, a.f, tC)
+                        P_est = a.n * gpu_power_w(a.f, pC)
+                        s["t_unit"] = T_unit
+                        s["p_est"] = P_est
+                        s["e_unit"] = P_est * T_unit
+                        state_map[dc.name] = s
+                    
+                    a = self.rl.select_per_dc(state_map, actions)
+                    job._rl_state0 = state_map[dc.name]
+                    job._rl_action = a
+                    n_rl = a.n
+                    f_rl = a.f
+                else:
+                    # Fallback to best energy frequency
+                    pC, tC = self.coeffs_map[(dc.name, job.jtype)]
+                    n_rl = 1
+                    f_rl = best_energy_freq(n_rl, dc.freq_levels, pC, tC)
+
+            #self._start_job_with_nf(dc, job, n_rl, f_rl)
+            self._resume_preempted_job(dc, preempted_job, n_rl, f_rl)
 
     # --- arrivals at ingress ---
     def _handle_ingress_arrival(self, jtype: str, ing_name: str):
@@ -628,6 +763,7 @@ class MultiIngressPaperSimulator:
         if self.algo in ("rl_energy", "rl_energy_adv") and (self.rl is not None) \
                 and hasattr(job, "_rl_action") and hasattr(job, "_rl_state0"):
             E_job = E_pred * job.size
+            # reward = -E_job (- 1000*laten) - 50*wait (- 0.1*overflow)
             reward = -float(E_job)
             ddl = getattr(job, "deadline", None)
             if ddl is not None:
@@ -650,12 +786,22 @@ class MultiIngressPaperSimulator:
                 f"{f_used:.3f}", g, f"{getattr(job, 'net_latency_s', 0.0):.4f}",
                 f"{job.start_time:.6f}", f"{job.finish_time:.6f}",
                 f"{(job.finish_time - job.start_time):.6f}",
+                f"{job.preempt_count:.6f}",
                 f"{T_pred:.6f}", f"{P_pred:.2f}", f"{E_pred:.2f}"
             ])
 
         # Bandit: cập nhật reward = - energy_per_unit (hoặc đổi sang carbon/cost nếu muốn)
         if getattr(self, "bandit", None) is not None:
             self.bandit.update(dc.name, job.jtype, f_used, E_pred)
+
+        # Elastic scaling - after a job completion
+        preempted_jobs = None
+        if self.elastic_scaling:
+            should_reallocate = self._should_reallocation(dc, job.jtype)
+            if should_reallocate and job.jtype == "training":
+                preempted_jobs = self._preempt_all_training_jobs(dc, f"Re-allocate on job completion.")
+            if preempted_jobs:
+                self._rl_reallocate_training_jobs(dc, preempted_jobs)
 
         # start next jobs (inference first)
         while dc.free_gpus > 0:

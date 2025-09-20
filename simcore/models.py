@@ -18,7 +18,20 @@ class Job:
     units_total: float = 0.0  # tổng đơn vị công việc (size)
     units_done: float = 0.0  # đã xử lý bao nhiêu đơn vị
     last_update: float = 0.0  # thời điểm cuối cùng ta “tiến độ hoá”
-    ev_gen: int = 0  # thế hệ event; dùng để vô hiệu hoá job_finish cũ
+    ev_gen: int = 0  # thế hệ event; dùng để vô hiệu hoá job_finish cũ - "lazy invalidation"
+
+    preemptible: bool = False
+    preempt_count: int = 0
+    total_preempt_time: float = 0
+    last_checkpoint: float = 0.0
+
+
+@dataclass
+class PreemptedJob:
+    job: Job
+    preempt_time: float
+    reason: str
+    preempt_ckpt: dict # units_done, f_used, gpus_assigned
 
 
 @dataclass
@@ -51,6 +64,10 @@ class DataCenter:
     util_gpu_time: float = 0.0  # ∑ (busy_gpus * dt)  [GPU·s]
     util_last_ts: float = 0.0  # mốc thời gian lần cuối cập nhật
     util_begin_ts: float = 0.0  # mốc bắt đầu tính trung bình
+
+    # preempt
+    preempted_jobs: List[PreemptedJob] = field(default_factory=list, init=False)
+    preempt_policy: str = "fifo" # "all"
 
     def __post_init__(self):
         assert self.default_freq in self.freq_levels, "default_freq phải thuộc freq_levels"

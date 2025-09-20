@@ -7,6 +7,16 @@ from simcore.network import Graph, Ingress
 from simcore.router import RouterPolicy
 
 
+def build_dc():
+    H100_PCIe = GPUType("H100-PCIe", p_idle=45.0, p_peak=350.0, p_sleep=28.0, alpha=3.0)
+
+    return {
+        "us-west": DataCenter("us-west", gpu_type=H100_PCIe, total_gpus=128,
+                              freq_levels=[0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
+                              default_freq=1.0, power_gating=True)
+    }
+
+
 def build_dcs():
     A100_SXM = GPUType("A100-SXM4", p_idle=50.0, p_peak=400.0, p_sleep=30.0, alpha=3.0)
     A100_PCIe = GPUType("A100-PCIe", p_idle=45.0, p_peak=300.0, p_sleep=28.0, alpha=3.0)
@@ -27,28 +37,28 @@ def build_dcs():
     L40S = GPUType("L40S", p_idle=40.0, p_peak=350.0, p_sleep=25.0, alpha=3.0)
 
     return {
-        "us-west": DataCenter("us-west", gpu_type=H100_PCIe, total_gpus=12,
+        "us-west": DataCenter("us-west", gpu_type=H100_PCIe, total_gpus=40,
                               freq_levels=[0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
                               default_freq=1.0, power_gating=True),
-        "us-east": DataCenter("us-east", gpu_type=A100_PCIe, total_gpus=10,
+        "us-east": DataCenter("us-east", gpu_type=A100_PCIe, total_gpus=40,
                               freq_levels=[0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
                               default_freq=1.0, power_gating=True),
-        "eu-west": DataCenter("eu-west", gpu_type=L40S, total_gpus=8,
+        "eu-west": DataCenter("eu-west", gpu_type=L40S, total_gpus=32,
                               freq_levels=[0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
                               default_freq=1.0, power_gating=True),
-        "eu-central": DataCenter("eu-central", gpu_type=H100_SXM, total_gpus=12,
+        "eu-central": DataCenter("eu-central", gpu_type=H100_SXM, total_gpus=48,
                                  freq_levels=[0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
                                  default_freq=1.0, power_gating=True),
-        "ap-southeast": DataCenter("ap-southeast", gpu_type=L4, total_gpus=10,
+        "ap-southeast": DataCenter("ap-southeast", gpu_type=L4, total_gpus=40,
                                    freq_levels=[0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
                                    default_freq=1.0, power_gating=True),
-        "ap-northeast": DataCenter("ap-northeast", gpu_type=H200_PCIe, total_gpus=12,
+        "ap-northeast": DataCenter("ap-northeast", gpu_type=H200_PCIe, total_gpus=48,
                                    freq_levels=[0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
                                    default_freq=1.0, power_gating=True),
-        "sa-east": DataCenter("sa-east", gpu_type=A30, total_gpus=8,
+        "sa-east": DataCenter("sa-east", gpu_type=A30, total_gpus=32,
                               freq_levels=[0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
                               default_freq=1.0, power_gating=True),
-        "me-central": DataCenter("me-central", gpu_type=A10, total_gpus=8,
+        "me-central": DataCenter("me-central", gpu_type=A10, total_gpus=32,
                                  freq_levels=[0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
                                  default_freq=1.0, power_gating=True),
     }
@@ -157,6 +167,16 @@ def build_paper_coeffs(dcs) -> Dict[tuple, tuple]:
     return coeffs
 
 
+def build_ingress_and_topology():
+    ingress = {
+        "gw-us-west": Ingress("gw-us-west", region="US")
+    }
+
+    g = Graph()
+    g.add_edge("gw-us-west", "us-west", 12)
+    g.add_edge("us-west", "gw-us-west", 12)
+
+    return ingress, g
 
 def build_ingresses_and_topology():
     # Ingress nodes

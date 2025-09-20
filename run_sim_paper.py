@@ -4,6 +4,7 @@ from configs.paper_config import (
     build_dcs, build_arrivals, build_policy, build_paper_coeffs,
     build_ingresses_and_topology, build_carbon_intensity, build_router_policy, build_energy_price
 )
+from configs.paper_config import build_dc, build_ingress_and_topology
 from simcore.validators import validate_gpus
 
 
@@ -81,6 +82,10 @@ def parse_args():
                        "eco_route", "rl_energy", "rl_energy_adv"
                    ])
     p.add_argument(
+        "--elastic-scaling", type=str, default=False,
+        help="Enable elastic scaling, hiện chỉ dùng cho RL."
+    )
+    p.add_argument(
         "--power-cap", type=float, default=0.0,
         help="Ngưỡng công suất tổng toàn hệ thống (Watt). Chỉ dùng với cap_uniform/cap_greedy; ≤0 = tắt controller."
     )
@@ -110,13 +115,14 @@ def parse_args():
 
 def main():
     args = parse_args()
-    dcs = build_dcs()
-
+    #dcs = build_dcs()
+    dcs = build_dc()
     warnings = validate_gpus((dc.gpu_type for dc in dcs.values()), strict=False)
     for m in warnings:
         print("[GPU VALIDATION]", m)
 
-    ingresses, graph = build_ingresses_and_topology()
+    #ingresses, graph = build_ingresses_and_topology()
+    ingresses, graph = build_ingress_and_topology()
     arrival_inf, arrival_trn = build_arrivals(inf_mode=args.inf_mode, inf_rate=args.inf_rate,
                                               inf_amp=args.inf_amp, inf_period=args.inf_period,
                                               trn_mode=args.trn_mode, trn_rate=args.trn_rate)
@@ -125,6 +131,7 @@ def main():
     carbon = build_carbon_intensity()
     price = build_energy_price()
     router = build_router_policy()
+    elastic_scaling = True if args.elastic_scaling == "True" else False
 
     sim = MultiIngressPaperSimulator(
         ingresses=ingresses, dcs=dcs, graph=graph,
@@ -133,7 +140,8 @@ def main():
         policy=policy, sim_duration=args.duration,
         log_interval=args.log_interval, log_path=args.log_path,
         rng_seed=args.seed,
-        algo=args.algo, power_cap=args.power_cap, control_interval=args.control_interval,
+        algo=args.algo, elastic_scaling=elastic_scaling,
+        power_cap=args.power_cap, control_interval=args.control_interval,
         show_progress=args.progress,
         # RL params
         rl_alpha=args.rl_alpha, rl_gamma=args.rl_gamma,
