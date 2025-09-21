@@ -87,11 +87,11 @@ def build_paper_coeffs(dcs) -> Dict[tuple, tuple]:
     # us-west: H100-PCIe (high-end)
     coeffs[("us-west", "training")] = (
         TrainPowerCoeffs(75.0, 80.0, 110.0),
-        TrainLatencyCoeffs(0.0045, 0.032, 0.0012)
+        TrainLatencyCoeffs(0.0005, 0.05, 0.0003)
     )
     coeffs[("us-west", "inference")] = (
         TrainPowerCoeffs(95.0, 20.0, 97.0),
-        TrainLatencyCoeffs(0.0090, 0.0018, 0.0007)
+        TrainLatencyCoeffs(0.002, 0.004, 0.0001)
     )
 
     # us-east: A100-PCIe (mid-high)

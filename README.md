@@ -98,6 +98,28 @@ hoặc đơn giản thay $\beta_t/f$ thành $\beta_t/(f\cdot n)$ rồi fit lại
 * Cố định `unit` rõ ràng (vd. "1 micro-batch 1k tokens").
 * Đo thời gian ở nhiều mức f và n → hồi quy phi tuyến theo gợi ý trên.
 
+### Job size
+* Inference: Phân phối Pareto với `xm` ~ scale tối thiểu, `alpha` ~ shape parameter (quyết định độ heavy-tailed).
+  * Theo lý thuyết, $\alpha \le 2$ thì Variance sẽ tiến đến vô cực.
+
+$$
+E[X] = \frac{\alpha x_m}{\alpha - 1}, \quad \alpha > 1
+$$
+
+$$
+Var[X] = \frac{\alpha x_m^2}{(\alpha-1)^2(\alpha-2)}, \quad \alpha > 2
+$$
+* Training: $X \sim \text{LogNormal}(\mu, \sigma^2)$
+
+$$
+E[X] = e^{\mu + \sigma^2 / 2}
+$$
+
+$$
+Var[X] = (e^{\sigma^2} - 1) \, e^{2\mu + \sigma^2}
+$$
+Tùy chỉnh các tham số để kiểm soát `service_time` hợp lý.
+
 ### Cách simulator dùng các hệ số
 
 * **Service time** của một job:
@@ -126,7 +148,7 @@ Các hệ số **không phụ thuộc** `GPUType.p_idle/p_sleep` — các số n
 Cấu trúc code:
 ```python
 build_arrivals(
-  inf_mode=args.inf_mode,   # "poisson" | "sinusoid"
+  inf_mode=args.inf_mode,   # "poisson" | "sinusoid" | "off"
   inf_rate=args.inf_rate,   # float, đơn vị: yêu cầu/giây
   inf_amp=args.inf_amp,     # float, biên độ dao động (chỉ dùng khi sinusoid)
   inf_period=args.inf_period,# float, chu kỳ (giây, chỉ dùng khi sinusoid)
@@ -145,7 +167,8 @@ Simulator sẽ sinh **sự kiện đến** theo cấu hình này và đẩy vào
 **Các tham số**
 
 * `*_mode`: kiểu tiến trình đến
-	* `"poisson"`: tốc độ đến **không đổi** $\lambda$. Khoảng cách giữa hai arrival i.i.d. **mũ** ⇒ CV=1.
+	* `"off"`: dùng để tắt train/inference nếu cần.
+    * `"poisson"`: tốc độ đến **không đổi** $\lambda$. Khoảng cách giữa hai arrival i.i.d. **mũ** ⇒ CV=1.
 	* `"sinusoid"`: tốc độ đến **thay đổi theo thời gian**:
 
 $$
@@ -304,12 +327,19 @@ python run_sim_paper.py --algo carbon_cost \
 
 ## Our algorithm
 
+* `--elastic-scaling` (default = `False`): hiện chỉ dùng cho **RL** - Tác nhân sẽ preempt và phân bổ lại tài nguyên cho training jobs sau mỗi sự kiện training job completion. 
+  * Qua thực nghiệm thấy (implement) chưa hiệu quả, làm tăng hàng đợi nhiều.
+
 ```bash
 python run_sim_paper.py --algo eco_route --eco-objective energy --duration 1200 --log-interval 5
 ```
 
 ```bash
 python run_sim_paper.py --algo rl_energy --rl-alpha 0.1 --rl-gamma 0.0 --rl-eps 0.2 --rl-eps-decay 0.995 --rl-eps-min 0.02 --rl-n-cand 2 --duration 1200 --log-interval 5
+```
+
+```bash
+python run_sim_paper.py --algo rl_energy_adv --rl-alpha 0.1 --rl-gamma 0.1 --rl-eps 0.05 --rl-eps-decay 0.999 --rl-eps-min 0.01 --rl-tau 0.1 --rl-clip-grad 5.0 --rl-baseline-beta 0.01 --rl-n-cand 2
 ```
 
 ## Vẽ đồ thị
@@ -322,7 +352,7 @@ Mỗi run (một cấu hình/thuật toán) để trong một thư mục có:
 Chạy:
 
 ```bash
-python plot_sim_results.py --run baseline=./runs/baseline --run cap_greedy=./runs/cap_greedy --run carbon=./runs/carbon_cost --outdir ./figs --bin 5
+python plot_sim_result.py --run baseline=./runs/baseline --run cap_greedy=./runs/cap_greedy --run carbon=./runs/carbon_cost --outdir ./figs --bin 5
 ```
 
 * `NAME=DIR`: tên muốn hiển thị trên legend và thư mục chứa CSV. Ví dụ: baseline=./runs/baseline

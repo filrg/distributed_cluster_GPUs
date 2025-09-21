@@ -652,7 +652,7 @@ class MultiIngressPaperSimulator:
             xm, alpha = 1, 1.8 # 0.02, 2.5 - alpha < 2 -> infinite variance?
             u = max(1e-9, 1 - random.random())
             return xm / (u ** (1 / alpha))
-        mu, sigma = math.log(20000), 0.4 # math.log(3.0), 0.6
+        mu, sigma = math.log(50000), 0.4 # math.log(3.0), 0.6
         return max(0.1, random.lognormvariate(mu, sigma))
 
     # --- after WAN transfer ---
@@ -786,7 +786,7 @@ class MultiIngressPaperSimulator:
                 f"{f_used:.3f}", g, f"{getattr(job, 'net_latency_s', 0.0):.4f}",
                 f"{job.start_time:.6f}", f"{job.finish_time:.6f}",
                 f"{(job.finish_time - job.start_time):.6f}",
-                f"{job.preempt_count:.6f}",
+                f"{job.preempt_count}",
                 f"{T_pred:.6f}", f"{P_pred:.2f}", f"{E_pred:.2f}"
             ])
 

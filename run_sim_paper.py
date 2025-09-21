@@ -45,7 +45,7 @@ def parse_args():
     # --- Arrivals (inference) ---
     p.add_argument(
         "--inf-mode", type=str, default="sinusoid",
-        choices=["poisson", "sinusoid"],
+        choices=["poisson", "sinusoid", "off"],
         help="Quy luật đến của yêu cầu inference: poisson = khoảng cách đến ~ Exp(λ); "
              "sinusoid = λ(t)=rate*[1+amp*sin(2π t/period)], cắt về 0 nếu âm."
     )
@@ -66,7 +66,7 @@ def parse_args():
     # --- Arrivals (training) ---
     p.add_argument(
         "--trn-mode", type=str, default="poisson",
-        choices=["poisson", "sinusoid"],
+        choices=["poisson", "sinusoid", "off"],
         help="Quy luật đến của yêu cầu training (mô tả như inference)."
     )
     p.add_argument(
