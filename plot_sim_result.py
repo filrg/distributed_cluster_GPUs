@@ -28,19 +28,21 @@ def aggregate_cluster(cl: pd.DataFrame) -> pd.DataFrame:
     """Aggregate cluster log to system-level by time.
        - total_power_W: sum power_W across DC
        - total_energy_kJ: sum energy_kJ across DC (system cumulative)
+       - total_job_unit: sum job_size ynit accross DC
        - util: (sum busy) / (sum (busy+free))
        - q_inf / q_train: sums across DC
        - freq_avg: simple average of freq across DC (for reference only)
     """
     df = cl.copy()
     # Ensure column types
-    for col in ["time_s", "power_W", "energy_kJ", "busy", "free", "q_inf", "q_train", "freq"]:
+    for col in ["time_s", "power_W", "energy_kJ", "acc_job_unit", "busy", "free", "q_inf", "q_train", "freq"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     df["total_gpus"] = df["busy"] + df["free"]
     g = df.groupby("time_s", as_index=False).agg(
         total_power_W=("power_W", "sum"),
         total_energy_kJ=("energy_kJ", "sum"),
+        total_job_unit=("acc_job_unit", "sum"),
         busy_sum=("busy", "sum"),
         total_gpus_sum=("total_gpus", "sum"),
         q_inf_sum=("q_inf", "sum"),
@@ -163,6 +165,33 @@ def plot_throughput(job_dict: Dict[str, pd.DataFrame], outpath: str, bin_size_s:
     plt.close()
 
 
+def plot_energy_by_load(agg_dict: Dict[str, pd.DataFrame], outpath: str):
+    names, total_energy_kJ, total_load = [], [], []
+    for name, df in agg_dict.items():
+        if "total_energy_kJ" in df.columns and "total_job_unit" in df.columns and len(df) > 0:
+            names.append(name)
+            total_energy_kJ.append(float(df["total_energy_kJ"].iloc[-1]))
+            total_load.append(float(df["total_job_unit"].iloc[-1]))
+    total_energy_J = np.array(total_energy_kJ) * 1000  # kJ → J
+    total_load = np.array(total_load)
+    totals = np.divide(total_energy_J, total_load)
+
+    positions = np.arange(len(names))
+    plt.figure(figsize=(6, 4))
+
+    plt.plot(positions, totals, marker="o", linestyle="-", color="tab:blue", linewidth=2)
+
+    for pos, total in zip(positions, totals):
+        plt.text(pos, total, f"{total:.1f}", ha="center", va="bottom", fontsize=9)
+    plt.xticks(positions, names, rotation=20)
+    plt.ylabel("Energy by Load (J/size)")
+    plt.title("Final Energy by Load per Run")
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(outpath, dpi=160)
+    plt.close()
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Plot multiple simulator runs (cluster/job CSVs) with matplotlib (no seaborn).")
@@ -240,6 +269,9 @@ def main():
     # 8) throughput vs time
     plot_throughput(jobs_by_run, outpath=os.path.join(args.outdir, "throughput_vs_time.png"),
                     bin_size_s=float(args.bin))
+
+    # 9) energy by load
+    plot_energy_by_load(agg_by_run, outpath=os.path.join(args.outdir, "energy_by_load.png"))
 
     print(f"Saved figures to: {args.outdir}")
 

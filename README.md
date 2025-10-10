@@ -325,6 +325,18 @@ python run_sim_paper.py --algo carbon_cost \
   --duration 1200 --log-interval 5
 ```
 
+## `debug` Cố định $n,f$
+Cố định $n,f$ cho các job, hiện dùng để kiểm tra hành vi DC chỉ training jobs: 
+* `--num_fixed_gpus` (default = `1`): Số GPUs cố định gán cho 1 job.
+* `--fixed_freq` (default = `None`): Tần số GPU cố định gán cho 1 job.
+  * Mặc định `None` sẽ chọn `best_energy_freq` với $n$ xác định.
+  * `best_energy_freq` **có thể thay đổi theo từng job**.
+
+```bash
+python run_sim_paper.py --algo debug --num_fixed_gpus 1 \
+--inf-mode off --trn-mode poisson --trn-rate 0.02 --duration 86400 --log-interval 10
+```
+
 ## Our algorithm
 
 * `--elastic-scaling` (default = `False`): hiện chỉ dùng cho **RL** - Tác nhân sẽ preempt và phân bổ lại tài nguyên cho training jobs sau mỗi sự kiện training job completion. 
@@ -358,3 +370,28 @@ python plot_sim_result.py --run baseline=./runs/baseline --run cap_greedy=./runs
 * `NAME=DIR`: tên muốn hiển thị trên legend và thư mục chứa CSV. Ví dụ: baseline=./runs/baseline
 * `--outdir`: nơi lưu hình.
 * `--bin`: kích thước bin (giây) cho biểu đồ throughput.
+
+
+### Log_path của mô phỏng
+- Khi chạy mô phỏng, mặc định tạo thư mục con **cùng tên thuật toán** để lưu log ở trong thư mục cha.
+  - Nếu **truyền cả thư mục con vào** thì sẽ lưu ở thư mục con đó.
+- Ví dụ: 
+```bash
+python run_sim_paper.py --algo debug --log-path results  # lưu log ở `results/debug/`
+```
+```bash
+python run_sim_paper.py --algo debug --log-path results/debug_1  # lưu log ở `results/debug_1/`
+```
+
+
+## Batch Script: `run_all.bat`
+
+- Tự động chạy mô phỏng cho nhiều cấu hình và plot **tất cả các runs** trong folder.
+  - Hiện file mẫu chạy `debug` với số GPUs chạy từ $1$ đến $8$, $f$ không truyền (tức `None`).
+- Các tham số phần CONFIG SECTION: 
+  - `SKIP_SIM`:
+    - `0`: chạy cả mô phỏng và vẽ hình.
+    - `1`: bỏ qua mô phỏng, chỉ vẽ hình từ tất cả các runs (tất cả các folder) hiện có.
+      - Tức, nếu chạy `SKIP_SIM = 1`, cần đảm bảo tất cả các folder trong folder cha đều là simulation runs. 
+  - Các tham số còn lại đều của mô phỏng chạy và vẽ đồ thị.
+---

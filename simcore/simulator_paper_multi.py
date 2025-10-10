@@ -49,7 +49,8 @@ class MultiIngressPaperSimulator:
                  control_interval: float = 5.0,
                  show_progress: bool = True,
                  rl_alpha=0.1, rl_gamma=0.0, rl_eps=0.2, rl_eps_decay=0.995, rl_eps_min=0.02, rl_n_cand=2,
-                 rl_tau=0.1, rl_clip_grad=5.0, rl_baseline_beta=0.01):
+                 rl_tau=0.1, rl_clip_grad=5.0, rl_baseline_beta=0.01,
+                 num_fixed_gpus=1, fixed_freq=None):
         self.now = 0.0
         self.end_time = sim_duration
         self.event_q: List[Event] = []
@@ -70,7 +71,9 @@ class MultiIngressPaperSimulator:
         self.cluster_log_path = "cluster_log.csv"
         self.job_log_path = "job_log.csv"
         if log_path:
-            out_dir = os.path.join(log_path, algo)
+            last_part = os.path.basename(os.path.normpath(log_path)) # take after "/" if exist
+            out_dir = log_path if last_part else os.path.join(log_path, algo)
+
             os.makedirs(out_dir, exist_ok=True)
             self.cluster_log_path = os.path.join(out_dir, "cluster_log.csv")
             self.job_log_path = os.path.join(out_dir, "job_log.csv")
@@ -92,6 +95,11 @@ class MultiIngressPaperSimulator:
         self.control_interval = control_interval
         self.bandit = BanditDVFS(init_explore=1, objective="energy") if algo == "bandit" else None
 
+        # debug
+        self.num_fixed_gpus = num_fixed_gpus
+        self.fixed_freq = fixed_freq
+
+        self.log_interval = log_interval
         self.show_progress = bool(show_progress)
         self._pbar = None
         self._pbar_last_t = 0.0
@@ -152,6 +160,7 @@ class MultiIngressPaperSimulator:
         # Ckpt restore
         job.units_done = preempted.preempt_ckpt["units_done"]
         job.f_used = f_resume # job.f_used = preempted.preempt_ckpt["f_used"]
+        job.gpus_assigned = n_resume
         job.last_update = self.now
 
         preempt_duration = self.now - preempted.preempt_time
@@ -162,7 +171,8 @@ class MultiIngressPaperSimulator:
 
         units_left = max(0.0, job.units_total - job.units_done)
         p_coeffs, t_coeffs = self.coeffs_map[(dc.name, job.jtype)]
-        T_unit = step_time_s(job.gpus_assigned, job.f_used, t_coeffs)
+        #T_unit = step_time_s(job.gpus_assigned, job.f_used, t_coeffs)
+        T_unit = step_time_s(n_resume, f_resume, t_coeffs)
         finish_time = units_left / max(1.0 / T_unit, 1e-9)
 
         job.ev_gen += 1
@@ -374,7 +384,7 @@ class MultiIngressPaperSimulator:
             csv.writer(f).writerow(["time_s", "dc", "freq", "busy", "free",
                                     "run_total", "run_inf", "run_train",
                                     "q_inf", "q_train",
-                                    "util_inst", "util_avg",
+                                    "util_inst", "util_avg", "acc_job_unit",
                                     "power_W", "energy_kJ"])
         with open(self.job_log_path, 'w', newline='') as f:
             csv.writer(f).writerow(["jid", "ingress", "type", "size", "dc", "f_used", "n_gpus",
@@ -484,7 +494,7 @@ class MultiIngressPaperSimulator:
                     if ddl is not None:
                         tC = self.coeffs_map[(dc.name, job.jtype)][1]
                         T_unit = step_time_s(n, f, tC)
-                        if T_unit > ddl:
+                        if T_unit * job.size > ddl:
                             continue
                     acts.append(RLAction(dc.name, n, f))
         return acts
@@ -718,6 +728,11 @@ class MultiIngressPaperSimulator:
                 n = max(1, min(a.n, dc.free_gpus, self.policy.max_gpus_per_job))
                 f = a.f
                 return self._start_job_with_nf(dc, job, n, f)
+            elif self.algo == "debug":
+                pC, tC = self.coeffs_map[(dc.name, job.jtype)]
+                n = self.num_fixed_gpus
+                f = self.fixed_freq if self.fixed_freq else best_energy_freq(n, dc.freq_levels, pC, tC)
+                return self._start_job_with_nf(dc, job, n, f)
             else:
                 gpus = select_gpus_and_set_freq(dc, job, self.policy)
                 if gpus > 0:
@@ -754,6 +769,9 @@ class MultiIngressPaperSimulator:
         job, g = tup
         dc.busy_gpus = max(0, dc.busy_gpus - g)
         job.finish_time = self.now
+        # Add remaining unit of job to accumulate upon job finish
+        # residual_log_time = job.finish_time % self.log_interval
+        self._log_accumulate_job_unit(dc, job, job.finish_time % self.log_interval)
 
         # Dùng f_used nếu đã bật per-job DVFS; fallback = tần số DC hiện tại
         p_coeffs, t_coeffs = self.coeffs_map[(dc.name, job.jtype)]
@@ -862,13 +880,25 @@ class MultiIngressPaperSimulator:
                 elapsed = max(1e-9, self.now - (dc.util_begin_ts or self.now))
                 util_avg = (dc.util_gpu_time / (dc.total_gpus * elapsed)) if dc.total_gpus else 0.0
                 power_now = self._estimate_dc_power(dc, getattr(dc, "current_freq", 1.0))
+                # Accumulate job_size of all running_jobs upon log event
+                for job, _ in dc.running_jobs.values():
+                    self._log_accumulate_job_unit(dc, job, interval)
 
                 w.writerow([f"{self.now:.3f}", name, f"{dc.current_freq:.2f}",
                             dc.busy_gpus, dc.free_gpus, run_total, run_inf, run_trn,
                             len(dc.q_inf), len(dc.q_train),
-                            f"{util_inst:.4f}", f"{util_avg:.4f}",
+                            f"{util_inst:.4f}", f"{util_avg:.4f}", f"{dc.accumulated_job_unit:.4f}",
                             f"{power_now:.2f}", f"{dc.energy_joules / 1000.0:.4f}"])
         self._schedule(self.now + interval, 'log', {'interval': interval})
+
+    def _log_accumulate_job_unit(self, dc: DataCenter, job: Job, accumulate_time: float):
+        """Accumulate job_size = 1 / T(n,f) x time"""
+        _, tC = self.coeffs_map[(dc.name, job.jtype)]
+        n = job.gpus_assigned
+        f = job.f_used
+        tpt_job = 1 / step_time_s(n, f, tC)
+
+        dc.accumulated_job_unit += (tpt_job * accumulate_time)
 
     def _start_job_with_nf(self, dc, job, n, f):
         # cấp phát

@@ -79,7 +79,7 @@ def parse_args():
                    choices=[
                        "baseline", "cap_uniform", "cap_greedy",
                        "joint_nf", "bandit", "carbon_cost",
-                       "eco_route", "rl_energy", "rl_energy_adv"
+                       "eco_route", "rl_energy", "rl_energy_adv", "debug"
                    ])
     p.add_argument(
         "--elastic-scaling", type=str, default=False,
@@ -109,6 +109,10 @@ def parse_args():
     p.add_argument("--rl-tau", type=float, default=0.1, help="Nhiệt độ softmax (nhỏ → khai thác nhiều).")
     p.add_argument("--rl-clip-grad", type=float, default=5.0, help="Ngưỡng clip gradient theo norm.")
     p.add_argument("--rl-baseline-beta", type=float, default=0.01, help="Hệ số cập nhật baseline reward.")
+
+    # debug params
+    p.add_argument("--num_fixed_gpus", type=int, default=1, help="Số GPUs cố định cho 1 job.")
+    p.add_argument("--fixed_freq", type = float, default=None, help="Tần số GPU cố định cho 1 job.")
 
     return p.parse_args()
 
@@ -148,7 +152,9 @@ def main():
         rl_eps=args.rl_eps, rl_eps_decay=args.rl_eps_decay, rl_eps_min=args.rl_eps_min,
         rl_n_cand=args.rl_n_cand,
         # improved RL algo
-        rl_tau=args.rl_tau, rl_clip_grad=args.rl_clip_grad, rl_baseline_beta=args.rl_baseline_beta
+        rl_tau=args.rl_tau, rl_clip_grad=args.rl_clip_grad, rl_baseline_beta=args.rl_baseline_beta,
+        # debug
+        num_fixed_gpus = args.num_fixed_gpus, fixed_freq = args.fixed_freq
     )
     sim.run()
     print(f"Done. ({args.algo}) Logs: cluster_log.csv, job_log.csv")

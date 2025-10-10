@@ -64,6 +64,7 @@ class DataCenter:
     util_gpu_time: float = 0.0  # ∑ (busy_gpus * dt)  [GPU·s]
     util_last_ts: float = 0.0  # mốc thời gian lần cuối cập nhật
     util_begin_ts: float = 0.0  # mốc bắt đầu tính trung bình
+    accumulated_job_unit: float = 0.0 # mốc lượng job unit tích lũy
 
     # preempt
     preempted_jobs: List[PreemptedJob] = field(default_factory=list, init=False)

@@ -21,6 +21,7 @@
 $$
 \textstyle util\_avg = \frac{\sum \text{busy}(t)\cdot \Delta t}{\text{total\_gpus}\cdot (time\_s - t_{start})}
 $$
+* **acc_job_unit** — **job_size unit tích lũy** của DC, cộng dồn theo 2 mốc event `log` (theo `dc.running_jobs`) và `job_finish`.
 * **power\_W** — **công suất tức thời** của DC (W), tính theo mô hình paper:
 
 $$
