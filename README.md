@@ -75,28 +75,19 @@ $$
 
 Công thức:
 
+Với $n=1$:
 $$
-T(n,f) = \alpha_t + \frac{\beta_t}{f} + \gamma_t n \quad\text{(s / unit)}
+T(n,f) = \alpha_t + \frac{\beta_t}{f} \quad \text{(s / unit)}
+$$
+Với $n>1$:
+$$
+T(n,f) = (\alpha_t + \frac{\beta_t}{f} + \gamma_t n) / n \quad \text{(s / unit)}
 $$
 
 * `unit` là **đơn vị công việc** người dùng định nghĩa trong simulator (ví dụ “một step training”, “một micro-batch”, hay “một batch inference cỡ b”).
 * `α_t` (s/unit) — overhead cố định (IO, setup).
 * `β_t` (s·(unit)·f) — phần tính toán **ngược tỉ lệ** với f (tăng f thì nhanh hơn).
 * `γ_t` (s/(unit·GPU)) — **phạt mở rộng** theo số GPU (đồng bộ, all-reduce…). Giá trị này **nhỏ**; nếu đặt lớn sẽ “giết” mọi lợi ích scale-out.
-
-**Lưu ý:**
-Với công thức như trên, tăng `n` **làm tăng** $T(n,f)$ (vì $+\gamma_t n$). Nếu muốn **scale-out có lợi**, dùng biến thể:
-
-$$
-T(n,f) = \alpha_t + \frac{\beta_t}{f n^{\eta}} + \gamma_t n,\quad 0<\eta\le1,
-$$
-
-hoặc đơn giản thay $\beta_t/f$ thành $\beta_t/(f\cdot n)$ rồi fit lại. Nếu không chỉnh, tối ưu sẽ luôn nghiêng về **n=1** (phi thực tế).
-
-**Gợi ý fit:**
-
-* Cố định `unit` rõ ràng (vd. "1 micro-batch 1k tokens").
-* Đo thời gian ở nhiều mức f và n → hồi quy phi tuyến theo gợi ý trên.
 
 ### Job size
 * Inference: Phân phối Pareto với `xm` ~ scale tối thiểu, `alpha` ~ shape parameter (quyết định độ heavy-tailed).
