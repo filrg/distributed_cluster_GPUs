@@ -871,6 +871,39 @@ class MultiIngressPaperSimulator:
             if nxt is None:
                 break
 
+            if self.algo in ("rl_energy", "rl_energy_adv") and (self.rl is not None):
+                # Liệt kê action ứng viên trên tất cả DC còn GPU rảnh
+                actions = []
+                state_map = {}
+                for dname, d in self.dcs.items():
+                    if d.free_gpus <= 0:
+                        continue
+                    nmax = min(d.free_gpus, self.policy.max_gpus_per_job)
+                    for n_try in range(1, nmax + 1):
+                        for f_try in d.freq_levels:
+                            actions.append(RLAction(dc_name=dname, n=n_try, f=float(f_try)))
+                    # state cho DC này
+                    state_map[dname] = self._rl_build_state(d, nxt, getattr(d, "current_freq", 1.0))
+
+                if not actions:
+                    # không DC nào rảnh → trả job lại hàng đợi DC hiện tại và thoát
+                    (dc.q_inf if nxt.jtype == 'inference' else dc.q_train).insert(0, nxt)
+                    break
+
+                a = self.rl.select_per_dc(state_map, actions)
+                dc_tgt = self.dcs[a.dc_name]
+
+                # Nếu job đang ở DC khác, “chuyển” nó sang DC đích để khởi chạy
+                self._start_job_with_nf(dc_tgt, nxt, a.n, a.f)
+
+                # Lưu dấu vết cho update khi job kết thúc
+                nxt._rl_state0 = state_map[a.dc_name]
+                nxt._rl_action = a
+
+                # Nếu DC đích khác DC hiện tại, không thể tiếp tục lặp theo dc.free_gpus cũ
+                # → thoát vòng để tránh giả định về dc.free_gpus
+                break
+
             if self.algo == "joint_nf":
                 pC, tC = self.coeffs_map[(dc.name, nxt.jtype)]
                 n_star, f_star, *_ = best_nf_grid(
