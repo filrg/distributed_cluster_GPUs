@@ -60,7 +60,7 @@ def best_nf_grid(n_max: int, freq_levels,
                 score = E * carbon_intensity  # J * gCO2/kWh (relative OK)
             elif objective == "cost":
                 score = (E / 3.6e6) * float(price_kwh)  # J -> kWh, rồi * giá
-            else:
+            else: # default = "energy"
                 score = E
 
             cand = (score, n, f, T, P, E)

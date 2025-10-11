@@ -21,6 +21,7 @@
 $$
 \textstyle util\_avg = \frac{\sum \text{busy}(t)\cdot \Delta t}{\text{total\_gpus}\cdot (time\_s - t_{start})}
 $$
+* **acc_job_unit** — **job_size unit tích lũy** của DC, cộng dồn theo 2 mốc event `log` (theo `dc.running_jobs`) và `job_finish`.
 * **power\_W** — **công suất tức thời** của DC (W), tính theo mô hình paper:
 
 $$
@@ -52,6 +53,7 @@ $$
 * **net\_lat\_s** (s) — độ trễ mạng trước khi job “vào máy” (transfer).
 * **start\_s**, **finish\_s** (s) — mốc thời gian mô phỏng khi job bắt đầu/kết thúc compute.
 * **latency\_s** (s) — latency compute thực tế = `finish_s − start_s` (không gồm mạng, không gồm chờ hàng đợi).
+* **preempt_count** (lần): Số lần công việc (training) bị preempt.
 * **T\_pred** (s/unit) — thời gian dự đoán trên **mỗi unit**: $T(n,f)$ từ `TrainLatencyCoeffs`.
 * **P\_pred** (W) — công suất dự đoán của **job** khi chạy: $P(n,f)=n\cdot P_{\text{gpu}}(f)$ từ `TrainPowerCoeffs`.
 * **E\_pred** (J/unit) — năng lượng dự đoán **mỗi unit** của job: $E_{\text{unit}}=P(n,f)\cdot T(n,f)$.

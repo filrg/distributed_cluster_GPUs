@@ -1,5 +1,4 @@
 from .coeffs import TrainPowerCoeffs
-from .models import DataCenter
 
 
 def gpu_power_w(f_ghz: float, coeffs: TrainPowerCoeffs) -> float:
