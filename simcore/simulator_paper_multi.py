@@ -1,4 +1,4 @@
-import csv, heapq, itertools, random, os
+import csv, heapq, itertools, random, os, numpy as np
 from typing import Dict, List, Tuple, Optional, Union
 from .models import Job, DataCenter, PreemptedJob
 from .arrivals import ArrivalConfig
@@ -6,7 +6,7 @@ from .policy import PolicyConfig, select_gpus_and_set_freq
 from .latency_paper import step_time_s
 from .policy_paper import energy_tuple, best_nf_grid, best_energy_freq
 from .network import Ingress, Graph
-from .router import RouterPolicy, select_dc
+from .router import RouterPolicy
 from .energy_paper import task_power_w, gpu_power_w
 from .learners import BanditDVFS
 from .freq_load_agg import TaskState, aggregate_with_atoms
@@ -48,6 +48,7 @@ class MultiIngressPaperSimulator:
                  power_cap: float = 0.0,
                  control_interval: float = 5.0,
                  show_progress: bool = True,
+                 rl_mode="weighted",
                  rl_alpha=0.1, rl_gamma=0.0, rl_eps=0.2, rl_eps_decay=0.995, rl_eps_min=0.02, rl_n_cand=2,
                  rl_tau=0.1, rl_clip_grad=5.0, rl_baseline_beta=0.01,
                  num_fixed_gpus=1, fixed_freq=None):
@@ -86,11 +87,20 @@ class MultiIngressPaperSimulator:
             self.rl = RLEnergyAgent(alpha=rl_alpha, gamma=rl_gamma, eps=rl_eps,
                                     eps_decay=rl_eps_decay, eps_min=rl_eps_min)
         elif self.algo == "rl_energy_adv":
-            self.rl = RLEnergyAgentAdv(alpha=rl_alpha, gamma=rl_gamma,
-                                       tau=getattr(self, "rl_tau", 0.1) if hasattr(self, "rl_tau") else 0.1,
-                                       eps=rl_eps, eps_decay=rl_eps_decay, eps_min=rl_eps_min,
-                                       clip_grad=getattr(self, "rl_clip_grad", 5.0) if hasattr(self, "rl_clip_grad") else 5.0,
-                                       baseline_beta=getattr(self, "rl_baseline_beta", 0.01) if hasattr(self, "rl_baseline_beta") else 0.01)
+            if rl_mode == "weighted":
+                self.rl = RLEnergyAgentAdv(mode="weighted", alpha=rl_alpha, gamma=rl_gamma, tau=rl_tau,
+                                           eps=rl_eps, eps_decay=rl_eps_decay, eps_min=rl_eps_min,
+                                           clip_grad=rl_clip_grad, baseline_beta=rl_baseline_beta,
+                                           w_energy=1.0, w_intensity=0.5, w_delay=0.05, w_tail=2.0, w_churn=0.01,
+                                           sla_ms=250.0)
+            elif rl_mode == "constrained":
+                self.rl = RLEnergyAgentAdv(mode="constrained", alpha=rl_alpha, gamma=rl_gamma, tau=rl_tau,
+                                           eps=rl_eps, eps_decay=rl_eps_decay, eps_min=rl_eps_min,
+                                           clip_grad=rl_clip_grad, baseline_beta=rl_baseline_beta,
+                                           power_budget_W=50000.0, lag_lr=0.02,
+                                           tau_min=0.05, tau_max=0.25, tau_adapt=True,
+                                           sla_ms=250.0)
+
         self.power_cap = power_cap
         self.control_interval = control_interval
         self.bandit = BanditDVFS(init_explore=1, objective="energy") if algo == "bandit" else None
@@ -460,7 +470,7 @@ class MultiIngressPaperSimulator:
         if bottleneck and bottleneck > 0.0:
             xfer_s = data_gb / bottleneck
         else:
-            # Graph của bạn trả 0.0 nếu bottleneck là vô cực -> coi như không tính phần băng thông
+            # Graph trả về 0.0 nếu bottleneck là vô cực -> coi như không tính phần băng thông
             xfer_s = 0.0
         transfer_s = Lnet_s + xfer_s
         return Lnet_s, path, bottleneck, cost_sum, transfer_s
@@ -634,11 +644,8 @@ class MultiIngressPaperSimulator:
                 dc_name = list(self.dcs.keys())[0]
                 Lnet, path, bottleneck, cost_sum, transfer_s = self._net_tuple(ing_name, dc_name, job)
         else:
-            # baseline / cap_* / joint_nf / bandit / carbon_cost: dùng router cũ
-            # Lưu ý: chọn DC xong vẫn phải lấy path/latency qua Graph.shortest_path_latency
-            dc_name, Lnet, path, _score = select_dc(ing, jtype, self.dcs, self.coeffs_map,
-                                                    self.graph, self.carbon, self.router_policy)
-            # Nếu select_dc CHƯA trả Lnet theo Graph mới, thì cập nhật lại bằng Graph hiện tại:
+            names = list(self.dcs.keys())
+            dc_name = random.choice(names)
             Lnet, path, bottleneck, cost_sum, transfer_s = self._net_tuple(ing_name, dc_name, job)
 
         # ----- LỊCH SỰ KIỆN chuyển tới DC -----
@@ -765,12 +772,13 @@ class MultiIngressPaperSimulator:
     def _handle_job_finish(self, dc_name: str, jid: int):
         dc = self.dcs[dc_name]
         tup = dc.running_jobs.pop(jid, None)
-        if not tup: return
+        if not tup:
+            return
         job, g = tup
         dc.busy_gpus = max(0, dc.busy_gpus - g)
         job.finish_time = self.now
+
         # Add remaining unit of job to accumulate upon job finish
-        # residual_log_time = job.finish_time % self.log_interval
         self._log_accumulate_job_unit(dc, job, job.finish_time % self.log_interval)
 
         # Dùng f_used nếu đã bật per-job DVFS; fallback = tần số DC hiện tại
@@ -778,25 +786,57 @@ class MultiIngressPaperSimulator:
         f_used = getattr(job, "f_used", dc.current_freq)
         T_pred, P_pred, E_pred = energy_tuple(g, f_used, p_coeffs, t_coeffs)  # per-unit
 
+        # ====== Chuẩn bị metrics cho RL (energy/latency/tail/power/...)
+        # Giả định E_pred là năng lượng (Joule) mỗi "unit" → đổi sang kWh
+        J_TO_KWH = 1.0 / 3.6e6
+        units_done = float(job.size)
+        E_job_kwh = float(E_pred) * units_done * J_TO_KWH
+
+        # Sojourn time của job (s) → ms
+        sojourn_s = max(0.0, job.finish_time - job.start_time)
+        sojourn_ms = 1000.0 * sojourn_s
+
+        # Theo dõi tail latency (P99) bằng cửa sổ trượt
+        if not hasattr(self, "_lat_hist"):
+            self._lat_hist = {"inference": [], "training": []}
+        buf = self._lat_hist.setdefault(job.jtype, [])
+        buf.append(sojourn_s)
+        # Giữ ~2k mẫu gần nhất
+        if len(buf) > 2048:
+            del buf[: len(buf) - 2048]
+        mean_ms = (sum(buf) / len(buf)) * 1000.0 if buf else sojourn_ms
+        p99_ms = float(np.percentile(buf, 99) * 1000.0) if len(buf) >= 5 else sojourn_ms
+
+        # Công suất hiện tại (xấp xỉ trung bình trong step) và số lần chuyển trạng thái nguồn
+        if self.power_cap > 0:
+            P_now = self._estimate_dc_power(dc, getattr(dc, "current_freq", 1.0))
+        else:
+            P_now = self._estimate_dc_power(dc, getattr(dc, "current_freq", 1.0))
+        power_state_changes = int(getattr(self, "_power_state_changes_step", 0))
+
+        # Metrics đưa cho agent (agent sẽ tự tính reward theo mode)
+        rl_metrics = {
+            "energy_kwh": E_job_kwh,
+            "units_processed": units_done,
+            "mean_latency_ms": mean_ms,
+            "p99_latency_ms": p99_ms,
+            "power_W": float(P_now),
+            "power_state_changes": power_state_changes,
+        }
+
+        # Gọi update cho RL (dựa trên metrics) nếu có RL và đã lưu state/action lúc start
         if self.algo in ("rl_energy", "rl_energy_adv") and (self.rl is not None) \
                 and hasattr(job, "_rl_action") and hasattr(job, "_rl_state0"):
-            E_job = E_pred * job.size
-            # reward = -E_job (- 1000*laten) - 50*wait (- 0.1*overflow)
-            reward = -float(E_job)
-            ddl = getattr(job, "deadline", None)
-            if ddl is not None:
-                laten = max(0.0, (job.finish_time - job.start_time) - ddl)
-                reward -= 1000.0 * laten
-            wait = max(0.0, job.start_time - job.arrival_time)
-            reward -= 50.0 * wait
-            if self.power_cap > 0:
-                P_now = self._estimate_dc_power(self.dcs[dc_name], getattr(self.dcs[dc_name], "current_freq", 1.0))
-                overflow = max(0.0, P_now - self.power_cap)
-                reward -= 0.1 * overflow
             next_state = self._rl_build_state(dc, job, 0.0)
             next_actions = self._rl_actions_for_job(job)
-            self.rl.update(job._rl_state0, job._rl_action, reward, next_state, next_actions, done=True)
+            # Dùng 'metrics' → agent tự tính reward (weighted hoặc constrained)
+            self.rl.update(
+                job._rl_state0, job._rl_action,
+                next_state=next_state, next_actions=next_actions,
+                done=True, metrics=rl_metrics
+            )
 
+        # Ghi log job (giữ nguyên)
         with open(self.job_log_path, 'a', newline='') as f:
             csv.writer(f).writerow([
                 job.jid, getattr(job, "ingress", ""),
@@ -812,7 +852,7 @@ class MultiIngressPaperSimulator:
         if getattr(self, "bandit", None) is not None:
             self.bandit.update(dc.name, job.jtype, f_used, E_pred)
 
-        # Elastic scaling - after a job completion
+        # Elastic scaling - after a job completion (giữ nguyên)
         preempted_jobs = None
         if self.elastic_scaling:
             should_reallocate = self._should_reallocation(dc, job.jtype)
@@ -821,16 +861,16 @@ class MultiIngressPaperSimulator:
             if preempted_jobs:
                 self._rl_reallocate_training_jobs(dc, preempted_jobs)
 
-        # start next jobs (inference first)
+        # start next jobs (inference first) (giữ nguyên)
         while dc.free_gpus > 0:
             nxt = None
             if self.policy.inf_priority and dc.q_inf:
                 nxt = dc.q_inf.pop(0)
             elif dc.q_train:
                 nxt = dc.q_train.pop(0)
-            if nxt is None: break
+            if nxt is None:
+                break
 
-            # Nhánh theo thuật toán
             if self.algo == "joint_nf":
                 pC, tC = self.coeffs_map[(dc.name, nxt.jtype)]
                 n_star, f_star, *_ = best_nf_grid(
@@ -862,7 +902,6 @@ class MultiIngressPaperSimulator:
                 self._start_job_with_nf(dc, nxt, n_star, f_star)
 
             else:
-                # baseline / cap_* : dùng policy cũ
                 gpus = select_gpus_and_set_freq(dc, nxt, self.policy)
                 if gpus <= 0:
                     (dc.q_inf if nxt.jtype == 'inference' else dc.q_train).insert(0, nxt)

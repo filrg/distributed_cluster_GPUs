@@ -98,6 +98,8 @@ def parse_args():
                    choices=["energy", "carbon", "cost"],
                    help="Mục tiêu cho eco_route: energy = min năng lượng; carbon = min E*CI; cost = min E*kWh*price.")
     # Hyperparams RL
+    p.add_argument("--rl-mode", type=str, default="weighted",
+                   choices=["weighted", "constrained"], help="Chế độ tính reward cho RL.")
     p.add_argument("--rl-alpha", type=float, default=0.1, help="Tốc độ học Q-learning (α).")
     p.add_argument("--rl-gamma", type=float, default=0.0, help="Hệ số chiết khấu (γ). 0.0 = contextual (1-step).")
     p.add_argument("--rl-eps", type=float, default=0.2, help="Xác suất khám phá ε (epsilon-greedy).")
@@ -148,13 +150,14 @@ def main():
         power_cap=args.power_cap, control_interval=args.control_interval,
         show_progress=args.progress,
         # RL params
+        rl_mode=args.rl_mode,
         rl_alpha=args.rl_alpha, rl_gamma=args.rl_gamma,
         rl_eps=args.rl_eps, rl_eps_decay=args.rl_eps_decay, rl_eps_min=args.rl_eps_min,
         rl_n_cand=args.rl_n_cand,
         # improved RL algo
         rl_tau=args.rl_tau, rl_clip_grad=args.rl_clip_grad, rl_baseline_beta=args.rl_baseline_beta,
         # debug
-        num_fixed_gpus = args.num_fixed_gpus, fixed_freq = args.fixed_freq
+        num_fixed_gpus=args.num_fixed_gpus, fixed_freq=args.fixed_freq
     )
     sim.run()
     print(f"Done. ({args.algo}) Logs: cluster_log.csv, job_log.csv")
