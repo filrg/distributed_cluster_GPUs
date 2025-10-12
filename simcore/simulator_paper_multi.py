@@ -7,11 +7,11 @@ from .latency_paper import step_time_s
 from .policy_paper import energy_tuple, best_nf_grid, best_energy_freq
 from .network import Ingress, Graph
 from .router import RouterPolicy
-from .energy_paper import task_power_w, gpu_power_w
+from .energy_paper import task_power_w
 from .learners import BanditDVFS
 from .freq_load_agg import TaskState, aggregate_with_atoms
-from .learners_rl import RLEnergyAgent
-from .learners_rl_adv import RLEnergyAgentAdv, RLAction
+from simcore.rl.learners_rl import RLEnergyAgent
+from simcore.rl.learners_rl_adv import RLEnergyAgentAdv, RLAction
 
 try:
     from tqdm.auto import tqdm
@@ -548,7 +548,7 @@ class MultiIngressPaperSimulator:
                         s = dict(base_state)
                         pC, tC = self.coeffs_map[(dc.name, job.jtype)]
                         T_unit = step_time_s(a.n, a.f, tC)
-                        P_est = a.n * gpu_power_w(a.f, pC)
+                        P_est = task_power_w(a.n, a.f, pC)
                         s["t_unit"] = T_unit
                         s["p_est"] = P_est
                         s["e_unit"] = P_est * T_unit
@@ -630,7 +630,7 @@ class MultiIngressPaperSimulator:
                     s = dict(base_map[a.dc_name])
                     pC, tC = self.coeffs_map[(a.dc_name, job.jtype)]
                     T_unit = step_time_s(a.n, a.f, tC)
-                    P_est = a.n * gpu_power_w(a.f, pC)
+                    P_est = task_power_w(a.n, a.f, pC)
                     s["t_unit"] = T_unit
                     s["p_est"] = P_est
                     s["e_unit"] = P_est * T_unit

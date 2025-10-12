@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Iterable, List
 from .coeffs import TrainPowerCoeffs, TrainLatencyCoeffs
 from .latency_paper import step_time_s
-from .energy_paper import gpu_power_w
+from .energy_paper import task_power_w
 
 
 @dataclass
@@ -34,7 +34,7 @@ def _V(n, f, t):
 
 
 def _P(n, f, p):
-    return n * gpu_power_w(f, p)
+    return task_power_w(n, f, p)
 
 
 def _nearest_idx(levels, f):

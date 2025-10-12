@@ -1,6 +1,7 @@
 import math, random
 from collections import defaultdict
 
+
 class BanditDVFS:
     """
     UCB1 trên tập tần số rời rạc per (dc, job_type).
