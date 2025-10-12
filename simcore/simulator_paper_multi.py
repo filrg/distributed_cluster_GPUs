@@ -79,12 +79,9 @@ class MultiIngressPaperSimulator:
         self.cluster_log_path = "cluster_log.csv"
         self.job_log_path = "job_log.csv"
         if log_path:
-            last_part = os.path.basename(os.path.normpath(log_path)) # take after "/" if exist
-            out_dir = log_path if last_part else os.path.join(log_path, algo)
-
-            os.makedirs(out_dir, exist_ok=True)
-            self.cluster_log_path = os.path.join(out_dir, "cluster_log.csv")
-            self.job_log_path = os.path.join(out_dir, "job_log.csv")
+            os.makedirs(log_path, exist_ok=True)
+            self.cluster_log_path = os.path.join(log_path, "cluster_log.csv")
+            self.job_log_path = os.path.join(log_path, "job_log.csv")
 
         self.algo = algo
         self.elastic_scaling = elastic_scaling and self.algo in ("rl_energy", "rl_energy_adv", "rl_energy_upgr")
@@ -242,9 +239,6 @@ class MultiIngressPaperSimulator:
         """Re-allocate on train completion (only with elastic_scaling)"""
         if job_type != "training":
             return False
-        # if self.algo not in ("rl_energy", "rl_energy_adv"):
-        #     return False
-
         num_running_train_jobs = sum(1 for job, _ in dc.running_jobs.values() if job.jtype == "training")
         return self.elastic_scaling and num_running_train_jobs > 1
 
@@ -951,7 +945,6 @@ class MultiIngressPaperSimulator:
             if self._replay.size >= self._upgr_warmup:
                 batch = self._replay.sample(self._upgr_batch)
                 stats = self.rl_upgr.train_step(batch)
-                # bạn có logger → thay print bằng logger
                 if stats:
                     self.logger.info({k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in stats.items()})
 
@@ -981,6 +974,7 @@ class MultiIngressPaperSimulator:
             should_reallocate = self._should_reallocation(dc, job.jtype)
             if should_reallocate and job.jtype == "training":
                 preempted_jobs = self._preempt_all_training_jobs(dc, f"Re-allocate on job completion.")
+                self.logger.info(f"Preempt all training jobs of {dc.name} at {self._current_hour()} upon job completion.")
             if preempted_jobs:
                 self._rl_reallocate_training_jobs(dc, preempted_jobs)
 

@@ -4,13 +4,14 @@ setlocal enabledelayedexpansion
 rem ==== CONFIG SECTION ==========
 set "ALGO=debug"
 set "NUM_FIXED_GPUS=1 2 3 4 5 6 7 8
+set "FIXED_FREQ=1.0"
 set "INF_MODE=off"
 set "TRN_MODE=poisson"
 set "DURATION=86400"
 set "LOG_INTERVAL=10"
 set "TRN_RATE=0.02"
 set "LOG_FOLDER=energy_freq"
-set "BIN=5"
+set "BIN=20"
 set "OUTDIR=%LOG_FOLDER%\figs_all"
 set "SKIP_SIM=1"
 
@@ -24,12 +25,13 @@ if "%SKIP_SIM%"=="0" (
         set "RUN_PATH=%LOG_FOLDER%\%ALGO%_%%r"
         mkdir "!RUN_PATH!" 2>nul
 
-        echo python run_sim_paper.py --algo %ALGO% --num_fixed_gpus %%r --inf-mode %INF_MODE% --trn-mode %TRN_MODE% --trn-rate %TRN_RATE% --duration %DURATION% --log-interval %LOG_INTERVAL% --log-path "!RUN_PATH!"
+        echo python run_sim_paper.py --algo %ALGO% --num_fixed_gpus %%r --fixed_freq %FIXED_FREQ% --inf-mode %INF_MODE% --trn-mode %TRN_MODE% --trn-rate %TRN_RATE% --duration %DURATION% --log-interval %LOG_INTERVAL% --log-path "!RUN_PATH!"
         echo.
 
         python run_sim_paper.py ^
             --algo %ALGO% ^
             --num_fixed_gpus %%r ^
+            --fixed_freq %FIXED_FREQ% ^
             --inf-mode %INF_MODE% ^
             --trn-mode %TRN_MODE% ^
             --trn-rate %TRN_RATE% ^

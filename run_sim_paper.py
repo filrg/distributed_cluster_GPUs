@@ -1,4 +1,4 @@
-import argparse
+import argparse, os
 from simcore.simulator_paper_multi import MultiIngressPaperSimulator
 from configs.paper_config import (
     build_dcs, build_arrivals, build_policy, build_paper_coeffs,
@@ -84,7 +84,7 @@ def parse_args():
                        "debug"
                    ])
     p.add_argument(
-        "--elastic-scaling", type=str, default=False,
+        "--elastic-scaling", type=bool, default=False,
         help="Enable elastic scaling, hiện chỉ dùng cho RL."
     )
     p.add_argument(
@@ -132,14 +132,14 @@ def parse_args():
 
 def main():
     args = parse_args()
-    #dcs = build_dcs()
-    dcs = build_dc()
+    dcs = build_dcs()
+    #dcs = build_dc()
     warnings = validate_gpus((dc.gpu_type for dc in dcs.values()), strict=False)
     for m in warnings:
         print("[GPU VALIDATION]", m)
 
-    #ingresses, graph = build_ingresses_and_topology()
-    ingresses, graph = build_ingress_and_topology()
+    ingresses, graph = build_ingresses_and_topology()
+    #ingresses, graph = build_ingress_and_topology()
     arrival_inf, arrival_trn = build_arrivals(inf_mode=args.inf_mode, inf_rate=args.inf_rate,
                                               inf_amp=args.inf_amp, inf_period=args.inf_period,
                                               trn_mode=args.trn_mode, trn_rate=args.trn_rate)
@@ -149,14 +149,19 @@ def main():
     price = build_energy_price()
     router = build_router_policy()
     elastic_scaling = True if args.elastic_scaling == "True" else False
-    logger = get_logger()
+    if args.log_path:
+        norm_path = os.path.normpath(args.log_path)
+        out_dir = os.path.join(norm_path, args.algo) if os.sep not in norm_path else norm_path
+    else:
+        out_dir = os.getcwd()
+    logger = get_logger(log_dir=out_dir)
 
     sim = MultiIngressPaperSimulator(
         ingresses=ingresses, dcs=dcs, graph=graph,
         arrival_inf=arrival_inf, arrival_train=arrival_trn,
         router_policy=router, coeffs_map=coeffs, carbon_intensity=carbon, energy_price=price,
         policy=policy, sim_duration=args.duration,
-        log_interval=args.log_interval, log_path=args.log_path,
+        log_interval=args.log_interval, log_path=out_dir,
         rng_seed=args.seed,
         algo=args.algo, elastic_scaling=elastic_scaling,
         power_cap=args.power_cap, control_interval=args.control_interval,

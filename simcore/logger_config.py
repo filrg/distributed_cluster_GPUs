@@ -1,17 +1,19 @@
-import logging
+import logging, os
 from logging.handlers import RotatingFileHandler
 
 LOGGER_NAME = "SIMU_DC"
 
 
-def get_logger():
+def get_logger(log_dir: str):
+    os.makedirs(log_dir, exist_ok=True)
+    log_path=os.path.join(log_dir, "project.log")
     logger = logging.getLogger(LOGGER_NAME)
     if not logger.hasHandlers():
         logger.setLevel(logging.DEBUG)
 
         # Handler ghi log ra file (append mode)
         file_handler = RotatingFileHandler(
-            "project.log",
+            log_path,
             mode='a',            # ghi nối tiếp, không ghi đè
             maxBytes=5_000_000,  # xoay file sau 5MB
             backupCount=3,       # giữ tối đa 3 file cũ

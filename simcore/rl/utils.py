@@ -40,8 +40,9 @@ def masked_softmax(logits: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.
     Invalid positions nhận -inf trước softmax.
     """
     if mask is not None:
+        mask = mask.to(dtype=torch.bool, device=logits.device)
         neg_inf = torch.finfo(logits.dtype).min
-        logits = torch.where(mask.bool(), logits, torch.full_like(logits, neg_inf))
+        logits = torch.where(mask, logits, torch.full_like(logits, neg_inf))
     return F.softmax(logits, dim=-1)
 
 

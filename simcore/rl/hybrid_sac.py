@@ -154,7 +154,7 @@ class HybridSAC(nn.Module):
         q1_t, q2_t = self.target_critic(h_next, a_dc_n, a_g_n, a_f_n.squeeze(-1))
         q_min = torch.min(q1_t, q2_t)  # [B, Nq]
         # entropy temperature term subtract
-        q_min = q_min - self.alpha.detach().view(1,)*logp_n.view(-1,1)
+        q_min = q_min - self.alpha.detach().to(self.device).view(1,)*logp_n.view(-1,1)
         return q_min, logp_n
 
     def update(self, batch: Dict[str, torch.Tensor], gamma: float = 0.99, tau: float = 0.005, target_entropy: float = -3.0):

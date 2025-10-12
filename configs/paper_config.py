@@ -37,28 +37,28 @@ def build_dcs():
     L40S = GPUType("L40S", p_idle=40.0, p_peak=350.0, p_sleep=25.0, alpha=3.0)
 
     return {
-        "us-west": DataCenter("us-west", gpu_type=H100_PCIe, total_gpus=40,
+        "us-west": DataCenter("us-west", gpu_type=H100_PCIe, total_gpus=120,
                               freq_levels=[0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
                               default_freq=1.0, power_gating=True),
-        "us-east": DataCenter("us-east", gpu_type=A100_PCIe, total_gpus=40,
+        "us-east": DataCenter("us-east", gpu_type=A100_PCIe, total_gpus=120,
                               freq_levels=[0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
                               default_freq=1.0, power_gating=True),
-        "eu-west": DataCenter("eu-west", gpu_type=L40S, total_gpus=32,
+        "eu-west": DataCenter("eu-west", gpu_type=L40S, total_gpus=96,
                               freq_levels=[0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
                               default_freq=1.0, power_gating=True),
-        "eu-central": DataCenter("eu-central", gpu_type=H100_SXM, total_gpus=48,
+        "eu-central": DataCenter("eu-central", gpu_type=H100_SXM, total_gpus=144,
                                  freq_levels=[0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
                                  default_freq=1.0, power_gating=True),
-        "ap-southeast": DataCenter("ap-southeast", gpu_type=L4, total_gpus=40,
+        "ap-southeast": DataCenter("ap-southeast", gpu_type=L4, total_gpus=120,
                                    freq_levels=[0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
                                    default_freq=1.0, power_gating=True),
-        "ap-northeast": DataCenter("ap-northeast", gpu_type=H200_PCIe, total_gpus=48,
+        "ap-northeast": DataCenter("ap-northeast", gpu_type=H200_PCIe, total_gpus=144,
                                    freq_levels=[0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
                                    default_freq=1.0, power_gating=True),
-        "sa-east": DataCenter("sa-east", gpu_type=A30, total_gpus=32,
+        "sa-east": DataCenter("sa-east", gpu_type=A30, total_gpus=96,
                               freq_levels=[0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
                               default_freq=1.0, power_gating=True),
-        "me-central": DataCenter("me-central", gpu_type=A10, total_gpus=32,
+        "me-central": DataCenter("me-central", gpu_type=A10, total_gpus=96,
                                  freq_levels=[0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
                                  default_freq=1.0, power_gating=True),
     }
@@ -85,13 +85,14 @@ def build_paper_coeffs(dcs) -> Dict[tuple, tuple]:
     coeffs = {}
 
     # us-west: H100-PCIe (high-end)
+    # tweak back to first coeff, last time adjustment due to wrong latency/computing performance model
     coeffs[("us-west", "training")] = (
         TrainPowerCoeffs(75.0, 80.0, 110.0),
-        TrainLatencyCoeffs(0.0005, 0.05, 0.0003)
+        TrainLatencyCoeffs(0.0045, 0.032, 0.0012) # single DC config: (0.0005, 0.05, 0.0003)
     )
     coeffs[("us-west", "inference")] = (
         TrainPowerCoeffs(95.0, 20.0, 97.0),
-        TrainLatencyCoeffs(0.002, 0.004, 0.0001)
+        TrainLatencyCoeffs(0.0090, 0.0018, 0.0007) # single DC config: (0.002, 0.004, 0.0001)
     )
 
     # us-east: A100-PCIe (mid-high)
