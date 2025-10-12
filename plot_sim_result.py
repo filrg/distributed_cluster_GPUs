@@ -247,8 +247,7 @@ def average_latency_by_config(job_dict: Dict[str, pd.DataFrame], outpath: str):
 def plot_completed_jobs_by_type(
     job_dict: Dict[str, pd.DataFrame],
     outpath: str,
-    kind: str = "grouped",   # "grouped" or "stacked"
-    rotation: int = 20
+    kind: str = "grouped"   # "grouped" or "stacked"
 ):
     """
     Draw number of completed jobs on algorithms.
@@ -258,8 +257,6 @@ def plot_completed_jobs_by_type(
     kind : {'grouped', 'stacked'}, default='grouped'
         - 'grouped' : two bars (training, inference) side by side.
         - 'stacked' : training/inference stacked vertically.
-    rotation : int, default=20
-        Rotation angle for x-tick labels.
     """
     rows = []
     for name, df in job_dict.items():
@@ -301,7 +298,7 @@ def plot_completed_jobs_by_type(
         for i, inf in enumerate(infer):
             (inf > 0) and plt.text(pos[i] + width/2, inf, str(inf), ha="center", va="bottom", fontsize=9)
 
-    plt.xticks(pos, names, rotation=rotation)
+    plt.xticks(pos, names, rotation=20)
     plt.ylabel("Number of completed jobs")
     plt.title("Completed jobs per config by type")
     plt.legend()
@@ -396,7 +393,7 @@ def main():
 
     # 11) number of jobs completed
     plot_completed_jobs_by_type(jobs_by_run, outpath=os.path.join(args.outdir, "completed_jobs_by_type.png"),
-                                kind="grouped", rotation=20)
+                                kind="grouped")
 
     print(f"Saved figures to: {args.outdir}")
 
