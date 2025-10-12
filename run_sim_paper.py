@@ -6,6 +6,7 @@ from configs.paper_config import (
 )
 from configs.paper_config import build_dc, build_ingress_and_topology
 from simcore.validators import validate_gpus
+from simcore.logger_config import get_logger
 
 
 def parse_args():
@@ -79,7 +80,8 @@ def parse_args():
                    choices=[
                        "baseline", "cap_uniform", "cap_greedy",
                        "joint_nf", "bandit", "carbon_cost",
-                       "eco_route", "rl_energy", "rl_energy_adv", "debug"
+                       "eco_route", "rl_energy", "rl_energy_adv", "rl_energy_upgr",
+                       "debug"
                    ])
     p.add_argument(
         "--elastic-scaling", type=str, default=False,
@@ -116,6 +118,15 @@ def parse_args():
     p.add_argument("--num_fixed_gpus", type=int, default=1, help="Số GPUs cố định cho 1 job.")
     p.add_argument("--fixed_freq", type = float, default=None, help="Tần số GPU cố định cho 1 job.")
 
+    # === Extra knobs for the upgraded RL mode (safe defaults) ===
+    p.add_argument('--upgr-buffer', type=int, default=200_000, help='Replay capacity for upgraded RL')
+    p.add_argument('--upgr-batch', type=int, default=256, help='Batch size for upgraded RL')
+    p.add_argument('--upgr-warmup', type=int, default=1_000, help='Warmup transitions before learning')
+    p.add_argument('--upgr-device', type=str, default='cuda', choices=['cuda', 'cpu'])
+    # Constraints (optional). Use your own units from the simulator.
+    p.add_argument('--sla_p99_ms', type=float, default=500.0, help='Target p99 latency (ms) as a constraint')
+    p.add_argument('--energy_budget_j', type=float, default=None, help='Cumulative energy budget (J) as a constraint')
+
     return p.parse_args()
 
 
@@ -138,6 +149,7 @@ def main():
     price = build_energy_price()
     router = build_router_policy()
     elastic_scaling = True if args.elastic_scaling == "True" else False
+    logger = get_logger()
 
     sim = MultiIngressPaperSimulator(
         ingresses=ingresses, dcs=dcs, graph=graph,
@@ -156,8 +168,11 @@ def main():
         rl_n_cand=args.rl_n_cand,
         # improved RL algo
         rl_tau=args.rl_tau, rl_clip_grad=args.rl_clip_grad, rl_baseline_beta=args.rl_baseline_beta,
+        # upgraded RL alog
+        energy_budget_j=args.energy_budget_j, sla_p99_ms=args.sla_p99_ms,
+        upgr_batch=args.upgr_batch, upgr_warmup=args.upgr_warmup, upgr_buffer=args.upgr_buffer,
         # debug
-        num_fixed_gpus=args.num_fixed_gpus, fixed_freq=args.fixed_freq
+        num_fixed_gpus=args.num_fixed_gpus, fixed_freq=args.fixed_freq, logger=logger
     )
     sim.run()
     print(f"Done. ({args.algo}) Logs: cluster_log.csv, job_log.csv")

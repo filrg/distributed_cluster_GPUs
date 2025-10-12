@@ -32,15 +32,22 @@ class RLEnergyAgentAdvUpgr:
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         # Tính r_eff từ CMDP
         r = batch['r']
-        costs = batch['costs']  # dict name->tensor [B]
+        costs = batch.get('costs', {})  # dict name->tensor [B]
         r_eff = r.clone()
-        for k, v in costs.items():
-            target = self.cmdp.constraints[k].target
-            e = (v - target).clamp(min=0.0)
+
+        # chỉ dùng những cost có định nghĩa constraint
+        active_keys = [k for k in costs.keys() if k in self.cmdp.constraints]
+
+        for k in active_keys:
+            spec = self.cmdp.constraints[k]
+            v = costs[k]
+            e = (v - spec.target).clamp(min=0.0)
             r_eff = r_eff - self.cmdp.lmbda[k].to(r.device) * e
+
         batch = {**batch, 'r_eff': r_eff}
         stats = self.algo.update(batch)
-        # cập nhật λ theo trung bình cost
-        lam_stats = self.cmdp.update_lagrange(costs)
+
+        # cập nhật λ chỉ với các cost có mặt
+        lam_stats = self.cmdp.update_lagrange({k: costs[k] for k in active_keys})
         stats.update(lam_stats)
         return stats
