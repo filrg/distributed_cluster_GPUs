@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Tuple, Callable
 @dataclass
 class Job:
     jid: int
+    ingress: str
     jtype: str  # 'inference' | 'training'
     size: float  # compute units trừu tượng
     arrival_time: float

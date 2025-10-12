@@ -67,13 +67,14 @@ def plot_lines_over_time(series_dict: Dict[str, pd.DataFrame], x, y, ylabel, tit
     plt.close()
 
 
-def plot_queues_over_time(series_dict: Dict[str, pd.DataFrame], outpath):
+def plot_queues_over_time(series_dict: Dict[str, pd.DataFrame], outpath, has_infer=True):
     # Two subplots would violate the "one chart per figure" rule in this environment.
     # So we produce a single figure with two overlaid lines per run for q_inf and q_train.
     plt.figure()
     for name, df in series_dict.items():
         if {"time_s", "q_inf_sum", "q_train_sum"}.issubset(df.columns):
-            plt.plot(df["time_s"], df["q_inf_sum"], label=f"{name}-q_inf")
+            if has_infer:
+                plt.plot(df["time_s"], df["q_inf_sum"], label=f"{name}-q_inf")
             plt.plot(df["time_s"], df["q_train_sum"], label=f"{name}-q_train")
     plt.xlabel("Time (s)")
     plt.ylabel("Queue length (requests)")
@@ -336,6 +337,11 @@ def main():
         jobs_by_run[name] = jb
         agg_by_run[name] = aggregate_cluster(cl)
 
+    total_infer = sum(
+        len(df[df["type"] == "inference"]) if "type" in df.columns else 0
+        for df in jobs_by_run.values()
+    )
+    has_infer = total_infer > 0
     # 1) total power over time
     plot_lines_over_time(
         {k: v for k, v in agg_by_run.items()},
@@ -366,12 +372,14 @@ def main():
     # 4) queues over time
     plot_queues_over_time(
         {k: v for k, v in agg_by_run.items()},
-        outpath=os.path.join(args.outdir, "queue_lengths_vs_time.png")
+        outpath=os.path.join(args.outdir, "queue_lengths_vs_time.png"),
+        has_infer=has_infer
     )
 
     # 5) latency histograms
-    plot_latency_hist(jobs_by_run, job_type="inference",
-                      outpath=os.path.join(args.outdir, "latency_hist_inference.png"))
+    if has_infer:
+        plot_latency_hist(jobs_by_run, job_type="inference",
+                          outpath=os.path.join(args.outdir, "latency_hist_inference.png"))
     plot_latency_hist(jobs_by_run, job_type="training",
                       outpath=os.path.join(args.outdir, "latency_hist_training.png"))
 

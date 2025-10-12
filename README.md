@@ -352,15 +352,19 @@ Mỗi run (một cấu hình/thuật toán) để trong một thư mục có:
 * `cluster_log.csv`
 * `job_log.csv`
 
-Chạy:
-
+So sánh các thuật toán
 ```bash
 python plot_sim_result.py --run baseline=./runs/baseline --run cap_greedy=./runs/cap_greedy --run carbon=./runs/carbon_cost --outdir ./figs --bin 5
+```
+Trong một thuật toán
+```bash
+python plot_single_algo.py --run baseline=./runs/baseline --run cap_greedy=./runs/cap_greedy --run carbon=./runs/carbon_cost --outdir ./debug_figs --bin 5
 ```
 
 * `NAME=DIR`: tên muốn hiển thị trên legend và thư mục chứa CSV. Ví dụ: baseline=./runs/baseline
 * `--outdir`: nơi lưu hình.
 * `--bin`: kích thước bin (giây) cho biểu đồ throughput.
+* `--scaledown`: Bước nhảy khi đọc hàng trong log.
 
 
 ### Log_path của mô phỏng
@@ -375,10 +379,7 @@ python run_sim_paper.py --algo debug --log-path results/debug_1  # lưu log ở 
 ```
 
 
-## Batch Script: `run_all.bat`
-
-- Tự động chạy mô phỏng cho nhiều cấu hình và plot **tất cả các runs** trong folder.
-  - Hiện file mẫu chạy `debug` với số GPUs chạy từ $1$ đến $8$, $f$ không truyền (tức `None`).
+## Batch Script:
 - Các tham số phần CONFIG SECTION: 
   - `SKIP_SIM`:
     - `0`: chạy cả mô phỏng và vẽ hình.

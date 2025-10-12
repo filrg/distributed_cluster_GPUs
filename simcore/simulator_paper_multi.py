@@ -625,7 +625,7 @@ class MultiIngressPaperSimulator:
         ing = self.ingresses[ing_name]
         jid = next(self.jid_counter)
         size = self._sample_job_size(jtype)
-        job = Job(jid=jid, jtype=jtype, size=size, arrival_time=self.now, dc_name=None)
+        job = Job(jid=jid, ingress=ing_name, jtype=jtype, size=size, arrival_time=self.now, dc_name=None)
 
         # ----- ROUTING: chọn DC theo algo -----
         if self.algo == "eco_route":
@@ -900,6 +900,7 @@ class MultiIngressPaperSimulator:
             "power_W": float(P_now),
             "power_state_changes": power_state_changes,
         }
+        self.logger.debug({k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in rl_metrics.items()})
 
         # Gọi update cho RL (dựa trên metrics) nếu có RL và đã lưu state/action lúc start
         if self.algo in ("rl_energy", "rl_energy_adv") and (self.rl is not None) \
