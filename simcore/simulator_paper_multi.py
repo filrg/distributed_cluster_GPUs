@@ -101,7 +101,7 @@ class MultiIngressPaperSimulator:
                 self.rl = RLEnergyAgentAdv(mode="weighted", alpha=rl_alpha, gamma=rl_gamma, tau=rl_tau,
                                            eps=rl_eps, eps_decay=rl_eps_decay, eps_min=rl_eps_min,
                                            clip_grad=rl_clip_grad, baseline_beta=rl_baseline_beta,
-                                           w_energy=1.0, w_intensity=0.5, w_delay=0.05, w_tail=2.0, w_churn=0.01,
+                                           w_energy=1.0, w_intensity=0.5, w_delay=0.2, w_tail=1.0, w_churn=0.01,
                                            sla_ms=sla_p99_ms)
             elif rl_mode == "constrained":
                 self.rl = RLEnergyAgentAdv(mode="constrained", alpha=rl_alpha, gamma=rl_gamma, tau=rl_tau,
@@ -917,8 +917,9 @@ class MultiIngressPaperSimulator:
         # === Update RL Upgr ===
         if (self.algo == "rl_energy_upgr" and self.rl_upgr is not None and
                 hasattr(job, "_upgr_action") and hasattr(job, "_upgr_state0")):
-            # Reward cơ sở: tối giản là - energy_kWh; phần ràng buộc (latency/power) do CMDP xử lý
-            r = -float(rl_metrics["energy_kwh"])
+            # TODO: Reward cơ sở: tối giản là - energy_kWh; phần ràng buộc (latency/power) do CMDP xử lý
+            # r = -float(rl_metrics["energy_kwh"])
+            r = - (float(rl_metrics["energy_kwh"]) / (float(rl_metrics["units_processed"] + 1e-9)))
 
             # Costs cho CMDP
             costs = {

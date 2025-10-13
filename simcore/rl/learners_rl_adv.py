@@ -214,17 +214,30 @@ class RLEnergyAgentAdv:
     def _reward_weighted(self, metrics: StepMetrics) -> float:
         units = max(1e-9, metrics.units_processed)
         energy = metrics.energy_kwh
-        energy_intensity = energy / units
         mean_lat = metrics.mean_latency_ms
-        p99 = metrics.p99_latency_ms
-        sla_violation = max(0.0, p99 - self.sla_ms) / max(self.sla_ms, 1e-9)
+        p99_ms = metrics.p99_latency_ms
+        power_state_changes = metrics.power_state_changes
+
+        E_scale = 0.10  # ~median energy kWh
+        I_scale = 3.0e-6  # ~median energy_per_unit
+        L_scale = max(1e-9, self.sla_ms)  # e.g. 300_000 ms
+
+        energy_term = energy / E_scale
+        intensity_term = (energy / units) / I_scale
+        mean_term = mean_lat / L_scale
+        viol_ratio = max(0.0, (p99_ms - self.sla_ms) / L_scale)
+
+        tau = 0.5  # độ mềm quanh ngưỡng
+        tail_term = min(np.log1p(viol_ratio / max(1e-9, tau)), 5.0)  # hinge trơn + bão hoà
+
+        churn_term = power_state_changes / 10.0  # nếu thường 0–10 lần/step
 
         r = (
-            - self.w_energy    * energy
-            - self.w_intensity * energy_intensity
-            - self.w_delay     * (mean_lat / 1000.0)
-            - self.w_tail      * sla_violation
-            - self.w_churn     * float(metrics.power_state_changes)
+            - self.w_energy    * energy_term
+            - self.w_intensity * intensity_term
+            - self.w_delay     * mean_term
+            - self.w_tail      * tail_term
+            - self.w_churn     * churn_term
         )
         return float(r)
 
