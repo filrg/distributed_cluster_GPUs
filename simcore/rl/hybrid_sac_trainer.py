@@ -4,7 +4,7 @@ from simcore.rl.replay import ReplayBuffer, Transition
 
 
 class HybridSACTrainer:
-    """Vòng lặp train tối giản (demo) — thay bằng trainer của bạn nếu đã có.
+    """Vòng lặp train tối giản (demo) — thay bằng trainer nếu đã có.
     """
     def __init__(self, agent, buffer: ReplayBuffer, gamma=0.99, batch_size=256):
         self.agent = agent

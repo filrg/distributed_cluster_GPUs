@@ -15,11 +15,11 @@ class RLEnergyAgentAdvUpgr:
         - step(action_dict) nhận {dc:int, g:int, f:float}
         - reward r và cost_dict (ví dụ: {"latency_p99":..., "power":...})
     """
-    def __init__(self, obs_dim: int, n_dc: int, n_g_choices: int, freq_minmax: tuple,
+    def __init__(self, obs_dim: int, n_dc: int, n_g_choices: int,
                  constraints: Dict[str, float], device: str = 'cpu'):
         self.device = torch.device(device)
         self.encoder = MLPStateEncoder(obs_dim).to(self.device)
-        self.actor = HybridActor(256, n_dc, n_g_choices, FreqBounds(*freq_minmax)).to(self.device)
+        self.actor = HybridActor(256, n_dc, n_g_choices).to(self.device)
         self.critic = QuantileCritic(256, n_dc, n_g_choices).to(self.device)
         self.algo = HybridSAC(self.encoder, self.actor, self.critic, device=self.device)
         specs = {k: ConstraintSpec(name=k, target=v) for k, v in constraints.items()}
@@ -27,7 +27,7 @@ class RLEnergyAgentAdvUpgr:
 
     def select_action(self, obs: torch.Tensor, mask_dc: Optional[torch.Tensor], mask_g: Optional[torch.Tensor], deterministic=False) -> Dict[str, Any]:
         a = self.algo.act(obs, mask_dc, mask_g, deterministic=deterministic)
-        return {"dc": int(a["dc"].item()), "g": int(a["g"].item()), "f": float(a["f"].item())}
+        return {"dc": int(a["dc"].item()), "g": int(a["g"].item())}
 
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         # Tính r_eff từ CMDP

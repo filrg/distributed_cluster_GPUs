@@ -12,7 +12,6 @@ class Transition:
     # actions (dc index, gpu choice index, freq float)
     a_dc: int
     a_g: int
-    a_f: float
     # raw reward and costs (dictionary keys must align with ConstraintSpec names)
     r: float
     costs: Dict[str, float]
@@ -46,7 +45,6 @@ class ReplayBuffer:
         s_next = torch.from_numpy(np.stack([b.s_next for b in batch])).float().to(self.device)
         a_dc = torch.tensor([b.a_dc for b in batch], dtype=torch.long, device=self.device)
         a_g = torch.tensor([b.a_g for b in batch], dtype=torch.long, device=self.device)
-        a_f = torch.tensor([b.a_f for b in batch], dtype=torch.float32, device=self.device)
         r = torch.tensor([b.r for b in batch], dtype=torch.float32, device=self.device)
         done = torch.tensor([b.done for b in batch], dtype=torch.float32, device=self.device)
         # pack costs into dict of tensors
@@ -62,7 +60,7 @@ class ReplayBuffer:
             mask_g = torch.from_numpy(np.stack([b.mask_g for b in batch])).bool().to(self.device)
         return {
             's': s, 's_next': s_next,
-            'a_dc': a_dc, 'a_g': a_g, 'a_f': a_f,
+            'a_dc': a_dc, 'a_g': a_g,
             'r': r, 'done': done,
             'costs': cost_tensors,
             'mask_dc': mask_dc, 'mask_g': mask_g,
@@ -70,7 +68,7 @@ class ReplayBuffer:
 
 # ---- Offline dataset (schema + loader) ----
 # Lưu ở dạng npz (nhẹ, nhanh) với các mảng song song cùng chiều N
-# Keys bắt buộc: s, s_next, a_dc, a_g, a_f, r, done
+# Keys bắt buộc: s, s_next, a_dc, a_g, r, done
 # Keys tuỳ chọn: costs/<name>, pref, mask_dc, mask_g
 
 def save_offline_npz(path: str, data: Dict[str, np.ndarray]):

@@ -8,7 +8,7 @@ def build_offline_npz_from_logs(logs, path: str):
     `logs` là iterable của bản ghi env: (s, a_dict, r, costs_dict, s_next, done, mask_dc, mask_g)
     """
     states, next_states = [], []
-    a_dc, a_g, a_f = [], [], []
+    a_dc, a_g = [], []
     rewards, dones = [], []
     mask_dc_list, mask_g_list = [], []
     # costs tách cột theo tên
@@ -20,7 +20,6 @@ def build_offline_npz_from_logs(logs, path: str):
         next_states.append(s2)
         a_dc.append(a['dc'])
         a_g.append(a['g'])
-        a_f.append(float(a['f']))
         rewards.append(r)
         dones.append(d)
         mask_dc_list.append(mdc)
@@ -37,7 +36,6 @@ def build_offline_npz_from_logs(logs, path: str):
         's_next': np.asarray(next_states, dtype=np.float32),
         'a_dc': np.asarray(a_dc, dtype=np.int64),
         'a_g': np.asarray(a_g, dtype=np.int64),
-        'a_f': np.asarray(a_f, dtype=np.float32),
         'r': np.asarray(rewards, dtype=np.float32),
         'done': np.asarray(dones, dtype=np.float32),
         'mask_dc': np.asarray(mask_dc_list, dtype=np.bool_),
