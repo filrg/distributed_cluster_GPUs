@@ -1,11 +1,11 @@
-import argparse
+import argparse, os
 from simcore.simulator_paper_multi import MultiIngressPaperSimulator
 from configs.paper_config import (
     build_dcs, build_arrivals, build_policy, build_paper_coeffs,
     build_ingresses_and_topology, build_carbon_intensity, build_router_policy, build_energy_price
 )
-from configs.paper_config import build_dc, build_ingress_and_topology
 from simcore.validators import validate_gpus
+from simcore.logger_config import get_logger
 
 
 def parse_args():
@@ -79,10 +79,11 @@ def parse_args():
                    choices=[
                        "baseline", "cap_uniform", "cap_greedy",
                        "joint_nf", "bandit", "carbon_cost",
-                       "eco_route", "rl_energy", "rl_energy_adv", "debug"
+                       "eco_route", "rl_energy", "rl_energy_adv", "rl_energy_upgr",
+                       "debug"
                    ])
     p.add_argument(
-        "--elastic-scaling", type=str, default=False,
+        "--elastic-scaling", type=bool, default=False,
         help="Enable elastic scaling, hiện chỉ dùng cho RL."
     )
     p.add_argument(
@@ -98,6 +99,8 @@ def parse_args():
                    choices=["energy", "carbon", "cost"],
                    help="Mục tiêu cho eco_route: energy = min năng lượng; carbon = min E*CI; cost = min E*kWh*price.")
     # Hyperparams RL
+    p.add_argument("--rl-mode", type=str, default="weighted",
+                   choices=["weighted", "constrained"], help="Chế độ tính reward cho RL.")
     p.add_argument("--rl-alpha", type=float, default=0.1, help="Tốc độ học Q-learning (α).")
     p.add_argument("--rl-gamma", type=float, default=0.0, help="Hệ số chiết khấu (γ). 0.0 = contextual (1-step).")
     p.add_argument("--rl-eps", type=float, default=0.2, help="Xác suất khám phá ε (epsilon-greedy).")
@@ -114,19 +117,28 @@ def parse_args():
     p.add_argument("--num_fixed_gpus", type=int, default=1, help="Số GPUs cố định cho 1 job.")
     p.add_argument("--fixed_freq", type = float, default=None, help="Tần số GPU cố định cho 1 job.")
 
+    # === Extra knobs for the upgraded RL mode (safe defaults) ===
+    p.add_argument('--upgr-buffer', type=int, default=200_000, help='Replay capacity for upgraded RL')
+    p.add_argument('--upgr-batch', type=int, default=256, help='Batch size for upgraded RL')
+    p.add_argument('--upgr-warmup', type=int, default=1_000, help='Warmup transitions before learning')
+    p.add_argument('--upgr-device', type=str, default='cuda', choices=['cuda', 'cpu'])
+    # Constraints (optional). Use your own units from the simulator.
+    p.add_argument('--sla_p99_ms', type=float, default=500.0, help='Target p99 latency (ms) as a constraint')
+    p.add_argument('--energy_budget_j', type=float, default=None, help='Cumulative energy budget (J) as a constraint')
+
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    #dcs = build_dcs()
-    dcs = build_dc()
+    dcs = build_dcs()
+    #dcs = build_dc()
     warnings = validate_gpus((dc.gpu_type for dc in dcs.values()), strict=False)
     for m in warnings:
         print("[GPU VALIDATION]", m)
 
-    #ingresses, graph = build_ingresses_and_topology()
-    ingresses, graph = build_ingress_and_topology()
+    ingresses, graph = build_ingresses_and_topology()
+    #ingresses, graph = build_ingress_and_topology()
     arrival_inf, arrival_trn = build_arrivals(inf_mode=args.inf_mode, inf_rate=args.inf_rate,
                                               inf_amp=args.inf_amp, inf_period=args.inf_period,
                                               trn_mode=args.trn_mode, trn_rate=args.trn_rate)
@@ -136,25 +148,35 @@ def main():
     price = build_energy_price()
     router = build_router_policy()
     elastic_scaling = True if args.elastic_scaling == "True" else False
+    if args.log_path:
+        norm_path = os.path.normpath(args.log_path)
+        out_dir = os.path.join(norm_path, args.algo) if os.sep not in norm_path else norm_path
+    else:
+        out_dir = os.getcwd()
+    logger = get_logger(log_dir=out_dir)
 
     sim = MultiIngressPaperSimulator(
         ingresses=ingresses, dcs=dcs, graph=graph,
         arrival_inf=arrival_inf, arrival_train=arrival_trn,
         router_policy=router, coeffs_map=coeffs, carbon_intensity=carbon, energy_price=price,
         policy=policy, sim_duration=args.duration,
-        log_interval=args.log_interval, log_path=args.log_path,
+        log_interval=args.log_interval, log_path=out_dir,
         rng_seed=args.seed,
         algo=args.algo, elastic_scaling=elastic_scaling,
         power_cap=args.power_cap, control_interval=args.control_interval,
         show_progress=args.progress,
         # RL params
+        rl_mode=args.rl_mode,
         rl_alpha=args.rl_alpha, rl_gamma=args.rl_gamma,
         rl_eps=args.rl_eps, rl_eps_decay=args.rl_eps_decay, rl_eps_min=args.rl_eps_min,
         rl_n_cand=args.rl_n_cand,
         # improved RL algo
         rl_tau=args.rl_tau, rl_clip_grad=args.rl_clip_grad, rl_baseline_beta=args.rl_baseline_beta,
+        # upgraded RL alog
+        energy_budget_j=args.energy_budget_j, sla_p99_ms=args.sla_p99_ms,
+        upgr_batch=args.upgr_batch, upgr_warmup=args.upgr_warmup, upgr_buffer=args.upgr_buffer,
         # debug
-        num_fixed_gpus = args.num_fixed_gpus, fixed_freq = args.fixed_freq
+        num_fixed_gpus=args.num_fixed_gpus, fixed_freq=args.fixed_freq, logger=logger
     )
     sim.run()
     print(f"Done. ({args.algo}) Logs: cluster_log.csv, job_log.csv")
