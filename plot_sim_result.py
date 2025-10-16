@@ -3,10 +3,11 @@ import argparse
 from typing import Dict, Tuple
 import pandas as pd
 import numpy as np
+import seaborn as sns
 import matplotlib.pyplot as plt
 
 
-def load_run(dir_path: str, scaledown: int = 1) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def load_run(dir_path: str, scaledown: int = 1, readafter: int = 0) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Load cluster_log.csv and job_log.csv from dir_path."""
     cl_path = os.path.join(dir_path, "cluster_log.csv")
     jb_path = os.path.join(dir_path, "job_log.csv")
@@ -85,18 +86,75 @@ def plot_queues_over_time(series_dict: Dict[str, pd.DataFrame], outpath, has_inf
     plt.close()
 
 
-def plot_latency_hist(job_dict: Dict[str, pd.DataFrame], job_type: str, outpath: str, bins: int = 40):
-    plt.figure()
+def plot_latency(job_dict: Dict[str, pd.DataFrame], job_type: str, outpath: str,
+                 bins: int = 40, kind: str = "boxen"):
+    """
+    Plot latency histogram (left) and violin/boxen distribution (right).
+
+    kind: 'violin' (default) or 'boxen'
+    """
+    records = []
+    for name, df in job_dict.items():
+        if {"type", "latency_s"}.issubset(df.columns):
+            d = df[df["type"] == job_type]
+            if not d.empty:
+                records.extend([{"Algorithm": name, "Latency (s)": v} for v in d["latency_s"]])
+    all_data = pd.DataFrame(records)
+    if all_data.empty:
+        print(f"[WARN] No data for job_type={job_type}")
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    # Histogram (left)
     for name, df in job_dict.items():
         if {"type", "latency_s"}.issubset(df.columns):
             d = df[df["type"] == job_type]
             if len(d) > 0:
-                plt.hist(d["latency_s"], bins=bins, alpha=0.5, label=name, density=False)
-    plt.xlabel("Latency (s)")
-    plt.ylabel("Count")
-    plt.title(f"Latency histogram — {job_type}")
-    plt.legend()
-    plt.tight_layout()
+                axes[0].hist(d["latency_s"], bins=bins, alpha=0.5, label=f"{name} - {len(d)} jobs")
+
+    axes[0].set_xlabel("Latency (s)")
+    axes[0].set_ylabel("Count")
+    axes[0].set_title(f"Latency Histogram — {job_type}")
+    axes[0].legend()
+    axes[0].grid(alpha=0.3)
+
+    # Violin / Boxen (right)
+    if kind == "violin":
+        sns.violinplot(
+            data=all_data,
+            x="Algorithm",
+            y="Latency (s)",
+            ax=axes[1],
+            inner="box",
+            density_norm="width",  # ~ scale
+            linewidth=1,
+            cut=0
+        )
+        # Overlay mean markers (use matplotlib directly to avoid deprecated join param)
+        means = all_data.groupby("Algorithm")["Latency (s)"].mean()
+        axes[1].scatter(range(len(means)), means, color="red", marker="D", label="Mean", s=40)
+        axes[1].legend(loc="upper right")
+        axes[1].set_title(f"Latency Violin — {job_type}")
+
+    elif kind == "boxen":
+        sns.boxenplot(
+            data=all_data,
+            x="Algorithm",
+            y="Latency (s)",
+            ax=axes[1],
+            linewidth=1,
+            outlier_prop=0.01  # giảm nhiễu tail
+        )
+        axes[1].set_title(f"Latency Boxen — {job_type}")
+    else:
+        raise ValueError("kind must be 'violin' or 'boxen'")
+
+    axes[1].set_ylabel("Latency (s)")
+    axes[1].grid(alpha=0.3)
+
+    plt.suptitle(f"Latency Distribution — {job_type}", fontsize=14)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.savefig(outpath, dpi=160)
     plt.close()
 
@@ -378,10 +436,10 @@ def main():
 
     # 5) latency histograms
     if has_infer:
-        plot_latency_hist(jobs_by_run, job_type="inference",
-                          outpath=os.path.join(args.outdir, "latency_hist_inference.png"))
-    plot_latency_hist(jobs_by_run, job_type="training",
-                      outpath=os.path.join(args.outdir, "latency_hist_training.png"))
+        plot_latency(jobs_by_run, job_type="inference",
+                     outpath=os.path.join(args.outdir, "latency_infer.png"))
+    plot_latency(jobs_by_run, job_type="training",
+                 outpath=os.path.join(args.outdir, "latency_train.png"))
 
     # 6) energy vs latency scatter
     plot_energy_vs_latency(jobs_by_run, outpath=os.path.join(args.outdir, "energy_per_job_scatter.png"))

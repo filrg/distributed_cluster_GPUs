@@ -4,12 +4,15 @@ from typing import Dict
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 from plot_sim_result import load_run
 
 
 def plot_queue_per_dc(cl: pd.DataFrame, outpath: str):
     dcs = sorted(cl['dc'].unique())
     n_dcs = len(dcs)
+
+    max_q = cl[['q_inf', 'q_train']].max().max()
 
     fig, axes = plt.subplots(n_dcs, 1, figsize=(12, 3 * n_dcs), sharex=True)
     if n_dcs == 1:
@@ -20,6 +23,7 @@ def plot_queue_per_dc(cl: pd.DataFrame, outpath: str):
         axes[idx].plot(dc_data['time_s'], dc_data['q_inf'], label='q_inf', linewidth=1.5)
         axes[idx].plot(dc_data['time_s'], dc_data['q_train'], label='q_train', linewidth=1.5)
         axes[idx].set_ylabel(f'{dc}\nQueue length')
+        axes[idx].set_ylim(0, max_q * 1.05) if max_q > 0 else axes[idx].set_ylim(0, 2)
         axes[idx].legend(loc='upper right')
         axes[idx].grid(alpha=0.3)
 
@@ -104,33 +108,52 @@ def plot_job_distribution_by_dc(jb: pd.DataFrame, cl: pd.DataFrame, outpath: str
     plt.close()
 
 
-def plot_job_freq_and_gpus(jb: pd.DataFrame, outpath: str):
-    """Plot frequency and n_gpus per job over time (dual y-axis)"""
-    jb = jb.copy().sort_values("start_s")
+def plot_freq_gpu_trend(jb: pd.DataFrame, outpath: str):
+    """
+    Plot trend of frequency (f_used) and GPU count (n_gpus) over job start time.
+    Fixed y-limits: freq [0.3, 1.0], n_gpus [1, 8].
+    """
+    jb = jb.copy().sort_values("start_s").reset_index(drop=True)
 
-    fig, ax1 = plt.subplots(figsize=(14, 6))
+    # Rolling mean smoothing (adaptive window)
+    window = min(2000, max(50, len(jb)//100))
+    jb["n_gpus_smooth"] = jb["n_gpus"].rolling(window, min_periods=1).mean()
 
-    # Primary axis: Frequency
-    color_freq = 'tab:blue'
-    ax1.set_xlabel('Job ID (by start time)')
-    ax1.set_ylabel('Frequency (f_used)', color=color_freq)
-    line1 = ax1.scatter(range(len(jb)), jb['f_used'],
-                        color=color_freq, alpha=0.6, s=20, label='Frequency')
-    ax1.tick_params(axis='y', labelcolor=color_freq)
+    # === Plot ===
+    fig, ax1 = plt.subplots(figsize=(12, 5))
+
+    # Primary axis: f_used scatter
+    sns.scatterplot(
+        data=jb,
+        x="start_s", y="f_used",
+        hue="n_gpus",
+        palette="viridis",
+        s=6, alpha=0.4, edgecolor=None,
+        ax=ax1
+    )
+
+    ax1.set_xlabel("Job Start Time (s)")
+    ax1.set_ylabel("Frequency (f_used)", color="tab:blue")
     ax1.set_ylim(0.3, 1.0)
-    ax1.grid(alpha=0.3)
-    # Secondary axis: Number of GPUs
-    ax2 = ax1.twinx()
-    color_gpu = 'tab:orange'
-    ax2.set_ylabel('Number of GPUs (n_gpus)', color=color_gpu)
-    line2 = ax2.scatter(range(len(jb)), jb['n_gpus'],
-                        color=color_gpu, alpha=0.6, s=20, marker='^', label='n_gpus')
-    ax2.tick_params(axis='y', labelcolor=color_gpu)
-    ax2.set_ylim(1, 10)
-    # Combined legend
-    ax1.legend([line1, line2], ['Frequency', 'n_gpus'], loc='upper right')
+    ax1.tick_params(axis="y", labelcolor="tab:blue")
+    ax1.grid(alpha=0.3, linestyle="--", linewidth=0.6)
 
-    plt.title('Job Frequency and GPU Count by Job ID (Completed Jobs)')
+    # Secondary axis: avg GPU trend
+    ax2 = ax1.twinx()
+    ax2.plot(
+        jb["start_s"], jb["n_gpus_smooth"],
+        color="tab:orange", linewidth=2.0, alpha=0.9, label="Avg n_gpus (rolling mean)"
+    )
+    ax2.set_ylabel("Average n_gpus (rolling mean)", color="tab:orange")
+    ax2.set_ylim(1, 8)
+    ax2.tick_params(axis="y", labelcolor="tab:orange")
+
+    # Legend & title
+    handles, labels = ax1.get_legend_handles_labels()
+    ax1.legend(handles=handles[1:], labels=labels[1:], title="n_gpus (per job)",
+               bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8, frameon=False)
+
+    plt.title("Job Frequency and GPU Usage Trend over Time", fontsize=13, pad=10)
     plt.tight_layout()
     plt.savefig(outpath, dpi=160)
     plt.close()
@@ -173,6 +196,7 @@ def plot_jobs_by_ingress(jb: pd.DataFrame, outpath: str):
 def plot_routing_heatmap(jb: pd.DataFrame, outpath: str):
     """Heatmap showing routing from ingress to DC"""
     routing = pd.crosstab(jb['ingress'], jb['dc'], normalize='index') * 100
+    routing = routing[routing.columns[::-1]] # reverse
 
     plt.figure(figsize=(14, 8))
     im = plt.imshow(routing.values, cmap='YlOrRd', aspect='auto', vmin=0, vmax=100)
@@ -278,25 +302,25 @@ def main():
         os.makedirs(run_outdir, exist_ok=True)
 
         # 1) Queue lengths per DC
-        plot_queue_per_dc(cl, os.path.join(run_outdir, "queue_per_dc.png"))
+        plot_queue_per_dc(cl, os.path.join(run_outdir, "queue.png"))
 
         # 2) Utilization per DC
-        plot_utilization_per_dc(cl, os.path.join(run_outdir, "util_per_dc.png"))
+        plot_utilization_per_dc(cl, os.path.join(run_outdir, "utilization.png"))
 
         # 3) Busy/Free GPUs per DC
-        plot_busy_per_dc(cl, os.path.join(run_outdir, "busy_per_dc.png"))
+        plot_busy_per_dc(cl, os.path.join(run_outdir, "busy_gpus.png"))
 
-        # 4) Freq and GPUs by Jobs (jid)
-        plot_job_freq_and_gpus(jb, os.path.join(run_outdir, "jid_freq_gpus.png"))
+        # 4) Freq and GPUs by Jobs trend (jid)
+        plot_freq_gpu_trend(jb, os.path.join(run_outdir, "nf_trend.png"))
 
         # 5) Energy per DC
-        plot_energy_per_dc(cl, os.path.join(run_outdir, "energy_per_dc.png"))
+        plot_energy_per_dc(cl, os.path.join(run_outdir, "energy.png"))
 
         # 6) Job distribution by DC
-        plot_job_distribution_by_dc(jb, cl, os.path.join(run_outdir, "job_dist.png"))
+        plot_job_distribution_by_dc(jb, cl, os.path.join(run_outdir, "job_distribution.png"))
 
         # 7) Jobs by ingress
-        plot_jobs_by_ingress(jb, os.path.join(run_outdir, "ingress_analysis.png"))
+        plot_jobs_by_ingress(jb, os.path.join(run_outdir, "ingress.png"))
 
         # 8) Routing heatmap
         plot_routing_heatmap(jb, os.path.join(run_outdir, "routing_heatmap.png"))
