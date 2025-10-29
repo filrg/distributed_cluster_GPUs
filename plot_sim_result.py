@@ -54,45 +54,83 @@ def aggregate_cluster(cl: pd.DataFrame) -> pd.DataFrame:
     return g
 
 
-def plot_lines_over_time(series_dict: Dict[str, pd.DataFrame], x, y, ylabel, title, outpath):
+def plot_lines_over_time(series_dict: Dict[str, pd.DataFrame], x, y, ylabel, title, outpath: str, show: bool = False):
+    """Plot power lines over time"""
     plt.figure()
+    
+    is_power = "power" in y.lower()
     for name, df in series_dict.items():
         if x in df.columns and y in df.columns:
-            plt.plot(df[x], df[y], label=name)
-    plt.xlabel("Time (s)")
+            y_data = df[y] / 1000 if is_power else df[y]
+            plt.plot(df[x], y_data, label=name)
+    plt.xlabel("Execution Time (s)")
     plt.ylabel(ylabel)
-    plt.title(title)
+    # plt.title(title)
     plt.legend()
     plt.tight_layout()
     plt.savefig(outpath, dpi=160)
+    if show:
+        plt.show()
     plt.close()
 
 
-def plot_queues_over_time(series_dict: Dict[str, pd.DataFrame], outpath, has_infer=True):
-    # Two subplots would violate the "one chart per figure" rule in this environment.
-    # So we produce a single figure with two overlaid lines per run for q_inf and q_train.
+def plot_queues_over_time(series_dict: Dict[str, pd.DataFrame], outpath: str, has_infer: bool = True, step: int = 86400):
+    """Plot queues along with DataFrame by time step."""
     plt.figure()
+    sampled_table = {}
+
     for name, df in series_dict.items():
         if {"time_s", "q_inf_sum", "q_train_sum"}.issubset(df.columns):
             if has_infer:
                 plt.plot(df["time_s"], df["q_inf_sum"], label=f"{name}-q_inf")
-            plt.plot(df["time_s"], df["q_train_sum"], label=f"{name}-q_train")
-    plt.xlabel("Time (s)")
+            plt.plot(df["time_s"], df["q_train_sum"], label=f"{name}")
+
+            time_points = np.arange(0, df["time_s"].max() + step, step)
+            interp_train = np.interp(time_points, df["time_s"], df["q_train_sum"])
+            if has_infer:
+                interp_infer = np.interp(time_points, df["time_s"], df["q_inf_sum"])
+                sampled_table[f"{name}_q_inf"] = interp_infer
+            sampled_table[f"{name}_q_train"] = interp_train
+
+    plt.xlabel("Execution Time (s)")
     plt.ylabel("Queue length (requests)")
-    plt.title("Queue lengths over time")
     plt.legend()
+    plt.tight_layout()
+
+    plt.savefig(outpath, dpi=160)
+    plt.close()
+
+    df_out = pd.DataFrame({"time_s": np.arange(0, df["time_s"].max() + step, step)})
+    for k, v in sampled_table.items():
+        df_out[k] = v
+
+    csv_path = os.path.splitext(outpath)[0] + "_table.csv"
+    df_out.to_csv(csv_path, index=False)
+
+    return df_out
+
+
+def plot_latency_histogram(job_dict: Dict[str, pd.DataFrame], job_type: str, outpath: str, bins: int = 40):
+    fig, ax = plt.subplots(figsize=(6, 5))
+
+    for name, df in job_dict.items():
+        if {"type", "latency_s"}.issubset(df.columns):
+            d = df[df["type"] == job_type]
+            if len(d) > 0:
+                ax.hist(d["latency_s"], bins=bins, alpha=0.5, label=f"{name} - {len(d)} jobs")
+
+    ax.set_xlabel("Latency (s)")
+    ax.set_ylabel("Count")
+    # ax.set_title(f"Latency Histogram — {job_type}")
+    ax.legend()
+    ax.grid(alpha=0.3)
+
     plt.tight_layout()
     plt.savefig(outpath, dpi=160)
     plt.close()
 
 
-def plot_latency(job_dict: Dict[str, pd.DataFrame], job_type: str, outpath: str,
-                 bins: int = 40, kind: str = "boxen"):
-    """
-    Plot latency histogram (left) and violin/boxen distribution (right).
-
-    kind: 'violin' (default) or 'boxen'
-    """
+def plot_latency_violin_or_boxen(job_dict: Dict[str, pd.DataFrame], job_type: str, outpath: str, kind: str = "boxen"):
     records = []
     for name, df in job_dict.items():
         if {"type", "latency_s"}.issubset(df.columns):
@@ -104,57 +142,43 @@ def plot_latency(job_dict: Dict[str, pd.DataFrame], job_type: str, outpath: str,
         print(f"[WARN] No data for job_type={job_type}")
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    fig, ax = plt.subplots(figsize=(7, 5))
 
-    # Histogram (left)
-    for name, df in job_dict.items():
-        if {"type", "latency_s"}.issubset(df.columns):
-            d = df[df["type"] == job_type]
-            if len(d) > 0:
-                axes[0].hist(d["latency_s"], bins=bins, alpha=0.5, label=f"{name} - {len(d)} jobs")
-
-    axes[0].set_xlabel("Latency (s)")
-    axes[0].set_ylabel("Count")
-    axes[0].set_title(f"Latency Histogram — {job_type}")
-    axes[0].legend()
-    axes[0].grid(alpha=0.3)
-
-    # Violin / Boxen (right)
     if kind == "violin":
         sns.violinplot(
             data=all_data,
             x="Algorithm",
             y="Latency (s)",
-            ax=axes[1],
+            ax=ax,
             inner="box",
             density_norm="width",  # ~ scale
             linewidth=1,
             cut=0
         )
-        # Overlay mean markers (use matplotlib directly to avoid deprecated join param)
+        # Overlay mean markers
         means = all_data.groupby("Algorithm")["Latency (s)"].mean()
-        axes[1].scatter(range(len(means)), means, color="red", marker="D", label="Mean", s=40)
-        axes[1].legend(loc="upper right")
-        axes[1].set_title(f"Latency Violin — {job_type}")
+        ax.scatter(range(len(means)), means, color="red", marker="D", label="Mean", s=40)
+        ax.legend(loc="upper right")
+        # ax.set_title(f"Latency Violin — {job_type}")
 
     elif kind == "boxen":
         sns.boxenplot(
             data=all_data,
             x="Algorithm",
             y="Latency (s)",
-            ax=axes[1],
+            ax=ax,
             linewidth=1,
-            outlier_prop=0.01  # giảm nhiễu tail
+            outlier_prop=0.01  # Reduce tail noise
         )
-        axes[1].set_title(f"Latency Boxen — {job_type}")
+        # ax.set_title(f"Latency Boxen — {job_type}")
     else:
         raise ValueError("kind must be 'violin' or 'boxen'")
 
-    axes[1].set_ylabel("Latency (s)")
-    axes[1].grid(alpha=0.3)
+    ax.set_ylabel("Latency (s)")
+    ax.set_xlabel("")
+    ax.grid(alpha=0.3)
 
-    plt.suptitle(f"Latency Distribution — {job_type}", fontsize=14)
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.tight_layout()
     plt.savefig(outpath, dpi=160)
     plt.close()
 
@@ -170,7 +194,7 @@ def plot_energy_vs_latency(job_dict: Dict[str, pd.DataFrame], outpath: str, samp
             plt.scatter(d["latency_s"], d["E_job_pred_J"], s=10, label=name)
     plt.xlabel("Latency (s)")
     plt.ylabel("Predicted energy per job (J)")
-    plt.title("Energy vs Latency (predicted)")
+    # plt.title("Energy vs Latency (predicted)")
     plt.legend(markerscale=1.5)
     plt.tight_layout()
     plt.savefig(outpath, dpi=160)
@@ -193,15 +217,16 @@ def plot_total_energy_bar(agg_dict: Dict[str, pd.DataFrame], outpath: str):
             ha="center", va="bottom", fontsize=9
         )
 
-    plt.xticks(positions, names, rotation=20)
+    plt.xticks(positions, names, rotation=15)
     plt.ylabel("Total energy (kJ)")
-    plt.title("Final total energy per run")
+    # plt.title("Final total energy per run")
+    plt.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     plt.savefig(outpath, dpi=160)
     plt.close()
 
 
-def plot_throughput(job_dict: Dict[str, pd.DataFrame], outpath: str, bin_size_s: float = 5.0):
+def plot_throughput(job_dict: Dict[str, pd.DataFrame], outpath: str, bin_size_s: float = 5.0, show: bool = False):
     plt.figure()
     for name, df in job_dict.items():
         if "finish_s" in df.columns:
@@ -217,14 +242,16 @@ def plot_throughput(job_dict: Dict[str, pd.DataFrame], outpath: str, bin_size_s:
             plt.plot(centers, throughput, label=name)
     plt.xlabel("Time (s)")
     plt.ylabel("Throughput (jobs/s)")
-    plt.title(f"Throughput vs time (bin={bin_size_s:.0f}s)")
+    # plt.title(f"Throughput vs time (bin={bin_size_s:.0f}s)")
     plt.legend()
     plt.tight_layout()
     plt.savefig(outpath, dpi=160)
+    if show: plt.show()
     plt.close()
 
 
 def plot_energy_by_load(agg_dict: Dict[str, pd.DataFrame], outpath: str):
+    """Energy by load (J/unit)."""
     names, total_energy_kJ, total_load = [], [], []
     for name, df in agg_dict.items():
         if "total_energy_kJ" in df.columns and "total_job_unit" in df.columns and len(df) > 0:
@@ -236,16 +263,18 @@ def plot_energy_by_load(agg_dict: Dict[str, pd.DataFrame], outpath: str):
     totals = np.divide(total_energy_J, total_load)
 
     positions = np.arange(len(names))
-    plt.figure(figsize=(6, 4))
-
-    plt.plot(positions, totals, marker="o", linestyle="-", color="tab:blue", linewidth=2)
+    plt.bar(positions, totals)
 
     for pos, total in zip(positions, totals):
-        plt.text(pos, total, f"{total:.4f}", ha="center", va="bottom", fontsize=9)
-    plt.xticks(positions, names, rotation=20)
+        plt.text(
+            pos, total, f"{total:.4f}",
+            ha="center", va="bottom", fontsize=9
+        )
+
+    plt.xticks(positions, names, rotation=15)
     plt.ylabel("Energy by Load (J/size)")
-    plt.title("Final Energy by Load per Run")
-    plt.grid(alpha=0.3)
+    # plt.title("Final Energy by Load per Run")
+    plt.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     plt.savefig(outpath, dpi=160)
     plt.close()
@@ -275,7 +304,7 @@ def average_latency_by_config(job_dict: Dict[str, pd.DataFrame], outpath: str):
 
     positions = np.arange(len(names))
     color_service_time = "tab:blue"
-    color_t_nf = "tab:orange"
+    # color_t_nf = "tab:orange"
 
     # Average Service Time
     ax1.set_xlabel("Configuration")
@@ -283,40 +312,29 @@ def average_latency_by_config(job_dict: Dict[str, pd.DataFrame], outpath: str):
     ax1.plot(positions, avg_service_time, marker="o", color=color_service_time, label="Avg latency")
     ax1.tick_params(axis="y", labelcolor=color_service_time)
     for x, y in zip(positions, avg_service_time):
-        ax1.text(x, y + 0.02 * max(avg_service_time), f"{y:.0f}", color=color_service_time, ha="center", va="bottom", fontsize=9)
+        ax1.text(x, y, f"{y:.0f}", color=color_service_time, ha="center", va="bottom", fontsize=9)
 
-    # Average T(n,f)
-    ax2 = ax1.twinx()
-    ax2.set_ylabel("Average T(n,f) (job_size/s)", color=color_t_nf)
-    ax2.plot(positions, avg_t_nf, marker="s", linestyle="--", color=color_t_nf, label="Avg throughput")
-    ax2.tick_params(axis="y", labelcolor=color_t_nf)
-    for x, y in zip(positions, avg_t_nf):
-        ax2.text(x, y - 0.02 * max(avg_t_nf), f"{y:.5f}", color=color_t_nf, ha="center", va="top",
-                 fontsize=9)
+    # # Average T(n,f)
+    # ax2 = ax1.twinx()
+    # ax2.set_ylabel("Average T(n,f) (job_size/s)", color=color_t_nf)
+    # ax2.plot(positions, avg_t_nf, marker="s", linestyle="--", color=color_t_nf, label="Avg throughput")
+    # ax2.tick_params(axis="y", labelcolor=color_t_nf)
+    # for x, y in zip(positions, avg_t_nf):
+    #     ax2.text(x, y, f"{y:.5f}", color=color_t_nf, ha="center", va="top",
+    #              fontsize=9)
 
     ax1.set_xticks(positions)
-    ax1.set_xticklabels(names, rotation=20)
-    plt.title("Average Service Time and T(n,f) by Configuration")
+    ax1.set_xticklabels(names, rotation=15)
+    # plt.title("Average Service Time (s).")
 
     fig.tight_layout()
     plt.savefig(outpath, dpi=160)
     plt.close()
 
 
-def plot_completed_jobs_by_type(
-    job_dict: Dict[str, pd.DataFrame],
-    outpath: str,
-    kind: str = "grouped"   # "grouped" or "stacked"
+def plot_completed_jobs_by_type(job_dict: Dict[str, pd.DataFrame], outpath: str,
+    kind: str = "grouped",   # "grouped" or "stacked"
 ):
-    """
-    Draw number of completed jobs on algorithms.
-
-    Parameters
-    ----------
-    kind : {'grouped', 'stacked'}, default='grouped'
-        - 'grouped' : two bars (training, inference) side by side.
-        - 'stacked' : training/inference stacked vertically.
-    """
     rows = []
     for name, df in job_dict.items():
         if df is None or len(df) == 0:
@@ -329,38 +347,49 @@ def plot_completed_jobs_by_type(
 
     agg = pd.DataFrame(rows).sort_values("config").reset_index(drop=True)
 
-    plt.figure()
-
     names = agg["config"].tolist()
     train = agg["training"].to_numpy()
     infer = agg["inference"].to_numpy()
     pos   = np.arange(len(names))
 
-    if kind.lower() == "stacked":
-        # Stacked bar
-        p1 = plt.bar(pos, train, label="Training")
-        p2 = plt.bar(pos, infer, bottom=train, label="Inference")
+    has_infer = np.any(infer > 0)
 
-        for i, (trn, inf) in enumerate(zip(train, infer)):
-            (trn > 0) and plt.text(i, trn/2, str(trn), ha="center", va="center", fontsize=9)  # train
-            (inf > 0) and plt.text(i, trn + inf/2, str(inf), ha="center", va="center", fontsize=9) # inference
-            total = trn + inf
-            plt.text(i, total, f"{total}", ha="center", va="bottom", fontsize=9)
+    plt.figure(figsize=(7, 5))
+
+    if has_infer:
+        if kind.lower() == "stacked":
+            p1 = plt.bar(pos, train, label="Training", color="tab:blue", alpha=0.8)
+            p2 = plt.bar(pos, infer, bottom=train, label="Inference", color="tab:orange", alpha=0.8)
+
+            for i, (trn, inf) in enumerate(zip(train, infer)):
+                if trn > 0:
+                    plt.text(i, trn / 2, str(trn), ha="center", va="center", fontsize=9)
+                if inf > 0:
+                    plt.text(i, trn + inf / 2, str(inf), ha="center", va="center", fontsize=9)
+                total = trn + inf
+                plt.text(i, total, f"{total}", ha="center", va="bottom", fontsize=9)
+        else:
+            width = 0.4
+            p1 = plt.bar(pos - width / 2, train, width, label="Training", color="tab:blue", alpha=0.8)
+            p2 = plt.bar(pos + width / 2, infer, width, label="Inference", color="tab:orange", alpha=0.8)
+
+            for i, trn in enumerate(train):
+                if trn > 0:
+                    plt.text(pos[i] - width / 2, trn, str(trn), ha="center", va="bottom", fontsize=9)
+            for i, inf in enumerate(infer):
+                if inf > 0:
+                    plt.text(pos[i] + width / 2, inf, str(inf), ha="center", va="bottom", fontsize=9)
     else:
-        # Grouped bar (default)
-        width = 0.4
-        p1 = plt.bar(pos - width/2, train, width, label="Training")
-        p2 = plt.bar(pos + width/2, infer, width, label="Inference")
+        bars = plt.bar(pos, train, color="tab:blue", edgecolor="black", alpha=0.8, label="Jobs")
+        for bar, value in zip(bars, train):
+            plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                     f"{value}", ha="center", va="bottom", fontsize=9)
 
-        for i, trn in enumerate(train):
-            (trn > 0) and plt.text(pos[i] - width/2, trn, str(trn), ha="center", va="bottom", fontsize=9)
-        for i, inf in enumerate(infer):
-            (inf > 0) and plt.text(pos[i] + width/2, inf, str(inf), ha="center", va="bottom", fontsize=9)
-
-    plt.xticks(pos, names, rotation=20)
+    plt.xticks(pos, names, rotation=15)
     plt.ylabel("Number of completed jobs")
-    plt.title("Completed jobs per config by type")
+    # plt.title("Completed jobs per config by type")
     plt.legend()
+    plt.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     plt.savefig(outpath, dpi=160)
     plt.close()
@@ -368,19 +397,21 @@ def plot_completed_jobs_by_type(
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Plot multiple simulator runs (cluster/job CSVs) with matplotlib (no seaborn).")
+        description="Plot multiple simulator runs (cluster/job CSVs) with matplotlib.")
     ap.add_argument("--run", action="append", default=[],
                     help="Khai báo 1 run: NAME=DIR; trong DIR có cluster_log.csv & job_log.csv. "
                          "Ví dụ: baseline=./runs/baseline (có thể dùng nhiều --run)")
     ap.add_argument("--outdir", type=str, default="./figs", help="Thư mục output để lưu các hình.")
     ap.add_argument("--bin", type=float, default=5.0, help="Kích thước bin (giây) cho throughput.")
     ap.add_argument("--scaledown", type=int, default=1, help="Bước nhảy khi đọc hàng trong log. Dùng khi muốn downsample.")
+    ap.add_argument("--show", action="store_true", help="Show những plot mật độ điểm lớn để điều chỉnh thủ công.")
+    ap.add_argument("--pdf", action="store_true", help="Lưu ảnh ra PDF (mặc định là PNG).")
     args = ap.parse_args()
 
     if not args.run:
         raise SystemExit("Cần ít nhất một --run NAME=DIR")
     os.makedirs(args.outdir, exist_ok=True)
-
+    save_format = "pdf" if args.pdf else "png"
     # Load
     cluster_by_run: Dict[str, pd.DataFrame] = {}
     jobs_by_run: Dict[str, pd.DataFrame] = {}
@@ -404,9 +435,10 @@ def main():
     plot_lines_over_time(
         {k: v for k, v in agg_by_run.items()},
         x="time_s", y="total_power_W",
-        ylabel="Total power (W)",
+        ylabel="Total power (kW)",
         title="Total power vs time",
-        outpath=os.path.join(args.outdir, "total_power_vs_time.png")
+        outpath=os.path.join(args.outdir, f"total_power_vs_time.{save_format}"),
+        show=args.show
     )
 
     # 2) cumulative energy over time
@@ -415,7 +447,8 @@ def main():
         x="time_s", y="total_energy_kJ",
         ylabel="Total energy (kJ)",
         title="Cumulative energy vs time",
-        outpath=os.path.join(args.outdir, "cumulative_energy_vs_time.png")
+        outpath=os.path.join(args.outdir, f"cumulative_energy_vs_time.{save_format}"),
+        show=False
     )
 
     # 3) utilization over time
@@ -424,41 +457,48 @@ def main():
         x="time_s", y="util",
         ylabel="Overall GPU utilization",
         title="Utilization vs time",
-        outpath=os.path.join(args.outdir, "utilization_vs_time.png")
+        outpath=os.path.join(args.outdir, f"utilization_vs_time.{save_format}"),
+        show=args.show
     )
 
     # 4) queues over time
     plot_queues_over_time(
         {k: v for k, v in agg_by_run.items()},
-        outpath=os.path.join(args.outdir, "queue_lengths_vs_time.png"),
+        outpath=os.path.join(args.outdir, f"queue_lengths_vs_time.{save_format}"),
         has_infer=has_infer
     )
 
-    # 5) latency histograms
+    # 5) latency
     if has_infer:
-        plot_latency(jobs_by_run, job_type="inference",
-                     outpath=os.path.join(args.outdir, "latency_infer.png"))
-    plot_latency(jobs_by_run, job_type="training",
-                 outpath=os.path.join(args.outdir, "latency_train.png"))
+        plot_latency_histogram(jobs_by_run, job_type="inference",
+                     outpath=os.path.join(args.outdir, f"latency_hist_infer.{save_format}"))
+    plot_latency_histogram(jobs_by_run, job_type="training",
+                 outpath=os.path.join(args.outdir, f"latency_hist_train.{save_format}"))
+
+    if has_infer:
+        plot_latency_violin_or_boxen(jobs_by_run, job_type="inference",
+                    outpath=os.path.join(args.outdir, f"latency_boxen_infer.{save_format}"))
+    plot_latency_violin_or_boxen(jobs_by_run, job_type="training",
+                    outpath=os.path.join(args.outdir, f"latency_boxen_train.{save_format}"))
 
     # 6) energy vs latency scatter
-    plot_energy_vs_latency(jobs_by_run, outpath=os.path.join(args.outdir, "energy_per_job_scatter.png"))
+    plot_energy_vs_latency(jobs_by_run, outpath=os.path.join(args.outdir, f"energy_per_job_scatter.{save_format}"))
 
     # 7) total energy bar
-    plot_total_energy_bar(agg_by_run, outpath=os.path.join(args.outdir, "total_energy_bar.png"))
+    plot_total_energy_bar(agg_by_run, outpath=os.path.join(args.outdir, f"total_energy_bar.{save_format}"))
 
     # 8) throughput vs time
-    plot_throughput(jobs_by_run, outpath=os.path.join(args.outdir, "throughput_vs_time.png"),
-                    bin_size_s=float(args.bin))
+    plot_throughput(jobs_by_run, outpath=os.path.join(args.outdir, f"throughput_vs_time.{save_format}"),
+                    bin_size_s=float(args.bin), show=args.show)
 
     # 9) energy by load
-    plot_energy_by_load(agg_by_run, outpath=os.path.join(args.outdir, "energy_by_load.png"))
+    plot_energy_by_load(agg_by_run, outpath=os.path.join(args.outdir, f"energy_by_load.{save_format}"))
 
     # 10) average latency & throughput of each config
-    average_latency_by_config(jobs_by_run, outpath=os.path.join(args.outdir, "avg_latency_throughput.png"))
+    average_latency_by_config(jobs_by_run, outpath=os.path.join(args.outdir, f"avg_latency_throughput.{save_format}"))
 
     # 11) number of jobs completed
-    plot_completed_jobs_by_type(jobs_by_run, outpath=os.path.join(args.outdir, "completed_jobs_by_type.png"),
+    plot_completed_jobs_by_type(jobs_by_run, outpath=os.path.join(args.outdir, f"completed_jobs_by_type.{save_format}"),
                                 kind="grouped")
 
     print(f"Saved figures to: {args.outdir}")

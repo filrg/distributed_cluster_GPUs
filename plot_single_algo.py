@@ -6,6 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from plot_sim_result import load_run
+from configs.paper_config import dc_gpus_dict, gw_alphabet_dict
 
 
 def plot_queue_per_dc(cl: pd.DataFrame, outpath: str):
@@ -195,18 +196,21 @@ def plot_jobs_by_ingress(jb: pd.DataFrame, outpath: str):
 
 def plot_routing_heatmap(jb: pd.DataFrame, outpath: str):
     """Heatmap showing routing from ingress to DC"""
+    plt.rcParams.update({'font.size': 14})
     routing = pd.crosstab(jb['ingress'], jb['dc'], normalize='index') * 100
     routing = routing[routing.columns[::-1]] # reverse
+    routing.columns = [dc_gpus_dict.get(col, col) for col in routing.columns]
+    routing.index = [gw_alphabet_dict.get(idx, idx) for idx in routing.index]
 
     plt.figure(figsize=(14, 8))
     im = plt.imshow(routing.values, cmap='YlOrRd', aspect='auto', vmin=0, vmax=100)
     plt.colorbar(im, label='Percentage of jobs (%)')
 
-    plt.xticks(range(len(routing.columns)), routing.columns, rotation=45, ha='right')
+    plt.xticks(range(len(routing.columns)), routing.columns, rotation=20, ha='right')
     plt.yticks(range(len(routing.index)), routing.index)
     plt.xlabel('Destination DC')
     plt.ylabel('Ingress Point')
-    plt.title('Job Routing Pattern (Ingress → DC)')
+    # plt.title('Job Routing Pattern (Ingress → DC)')
 
     # Add percentage text
     for i in range(len(routing.index)):
@@ -216,7 +220,7 @@ def plot_routing_heatmap(jb: pd.DataFrame, outpath: str):
                 plt.text(j, i, f'{val:.1f}%',
                          ha='center', va='center',
                          color='white' if val > 50 else 'black',
-                         fontsize=7)
+                         fontsize=12)
 
     plt.tight_layout()
     plt.savefig(outpath, dpi=160)
@@ -272,13 +276,13 @@ def main():
                          "Ví dụ: baseline=./runs/baseline (có thể dùng nhiều --run)")
     ap.add_argument("--outdir", type=str, default="./debug_figs", help="Thư mục output để lưu các hình.")
     ap.add_argument("--scaledown", type=int, default=1, help="Bước nhảy khi đọc hàng trong log. Dùng khi muốn downsample.")
+    ap.add_argument("--pdf", action="store_true", help="Lưu ảnh ra PDF (mặc định là PNG).")
     args = ap.parse_args()
 
     if not args.run:
         raise SystemExit("Need at least one --run NAME=DIR")
-
     os.makedirs(args.outdir, exist_ok=True)
-
+    save_format = "pdf" if args.pdf else "png"
     # Load all runs
     runs_data: Dict[str, dict] = {}
 
@@ -323,7 +327,7 @@ def main():
         plot_jobs_by_ingress(jb, os.path.join(run_outdir, "ingress.png"))
 
         # 8) Routing heatmap
-        plot_routing_heatmap(jb, os.path.join(run_outdir, "routing_heatmap.png"))
+        plot_routing_heatmap(jb, os.path.join(run_outdir, f"routing_heatmap.{save_format}"))
 
     print(f"Debug plots saved to: {args.outdir}")
 

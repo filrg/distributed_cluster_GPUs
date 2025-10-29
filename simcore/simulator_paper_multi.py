@@ -10,8 +10,6 @@ from .router import RouterPolicy
 from .energy_paper import task_power_w
 from .learners import BanditDVFS
 from .freq_load_agg import TaskState, aggregate_with_atoms
-from simcore.rl.learners_rl import RLEnergyAgent
-from simcore.rl.learners_rl_adv import RLEnergyAgentAdv, RLAction
 from simcore.rl.rl_energy_agent_adv_upgrade import RLEnergyAgentAdvUpgr
 from simcore.rl.replay import ReplayBuffer, Transition
 
@@ -53,9 +51,6 @@ class MultiIngressPaperSimulator:
                  sla_p99_ms: float = 500.0,
                  control_interval: float = 5.0,
                  show_progress: bool = True,
-                 # rl_mode="weighted",
-                 # rl_alpha=0.1, rl_gamma=0.0, rl_eps=0.2, rl_eps_decay=0.995, rl_eps_min=0.02, rl_n_cand=2,
-                 # rl_tau=0.1, rl_clip_grad=5.0, rl_baseline_beta=0.01,
                  upgr_batch: int = 256, upgr_warmup: int = 1000, upgr_buffer: int = 200000,
                  num_fixed_gpus=1, fixed_freq=None):
         self.now = 0.0
@@ -85,7 +80,7 @@ class MultiIngressPaperSimulator:
 
         self.algo = algo
         self.elastic_scaling = elastic_scaling and self.algo in ("rl_energy_upgr")
-        self.rl = self.algo in ("rl_energy_upgr")
+        # self.rl = None
         # self.rl_n_cand = int(rl_n_cand)
 
         self.power_cap = power_cap
@@ -93,23 +88,6 @@ class MultiIngressPaperSimulator:
         self.control_interval = control_interval
         self.bandit = BanditDVFS(init_explore=1, objective="energy") if algo == "bandit" else None
 
-        # if self.algo == "rl_energy":
-        #     self.rl = RLEnergyAgent(alpha=rl_alpha, gamma=rl_gamma, eps=rl_eps,
-        #                             eps_decay=rl_eps_decay, eps_min=rl_eps_min)
-        # elif self.algo == "rl_energy_adv":
-        #     if rl_mode == "weighted":
-        #         self.rl = RLEnergyAgentAdv(mode="weighted", alpha=rl_alpha, gamma=rl_gamma, tau=rl_tau,
-        #                                    eps=rl_eps, eps_decay=rl_eps_decay, eps_min=rl_eps_min,
-        #                                    clip_grad=rl_clip_grad, baseline_beta=rl_baseline_beta,
-        #                                    w_energy=1.0, w_intensity=0.5, w_delay=0.2, w_tail=1.0, w_churn=0.01,
-        #                                    sla_ms=sla_p99_ms)
-        #     elif rl_mode == "constrained":
-        #         self.rl = RLEnergyAgentAdv(mode="constrained", alpha=rl_alpha, gamma=rl_gamma, tau=rl_tau,
-        #                                    eps=rl_eps, eps_decay=rl_eps_decay, eps_min=rl_eps_min,
-        #                                    clip_grad=rl_clip_grad, baseline_beta=rl_baseline_beta,
-        #                                    power_budget_W=50000.0, lag_lr=0.02,
-        #                                    tau_min=0.05, tau_max=0.25, tau_adapt=True,
-        #                                    sla_ms=sla_p99_ms)
         # === RL Upgraded mode ===
         self.rl_upgr = None
         if self.algo == "rl_energy_upgr":
@@ -222,12 +200,11 @@ class MultiIngressPaperSimulator:
         preempt_duration = self.now - preempted.preempt_time
         job.total_preempt_time += preempt_duration
         # Resume
-        dc.busy_gpus += n_resume #dc.busy_gpus += job.gpus_assigned
+        dc.busy_gpus += n_resume
         dc.running_jobs[job.jid] = (job, n_resume)
 
         units_left = max(0.0, job.units_total - job.units_done)
         p_coeffs, t_coeffs = self.coeffs_map[(dc.name, job.jtype)]
-        #T_unit = step_time_s(job.gpus_assigned, job.f_used, t_coeffs)
         T_unit = step_time_s(n_resume, f_resume, t_coeffs)
         finish_time = units_left / max(1.0 / T_unit, 1e-9)
 
@@ -518,95 +495,12 @@ class MultiIngressPaperSimulator:
         transfer_s = Lnet_s + xfer_s
         return Lnet_s, path, bottleneck, cost_sum, transfer_s
 
-    # # TODO
-    # def _rl_build_state(self, dc, job, net_lat_est: float) -> dict:
-    #     return {
-    #         "job_type": job.jtype,
-    #         "job_size": job.size,
-    #         "dc_total": dc.total_gpus,
-    #         "dc_busy": dc.busy_gpus,
-    #         "dc_q_inf": len(dc.q_inf),
-    #         "dc_q_trn": len(dc.q_train),
-    #         "net_lat": net_lat_est,
-    #         "f_levels_len": len(dc.freq_levels)
-    #     }
-    #
-    # def _rl_actions_for_job(self, job) -> list[RLAction]:
-    #     acts = []
-    #     for dc in self.dcs.values():
-    #         if not dc.freq_levels:
-    #             continue
-    #         # lấy vài mức f tiêu biểu: min, median, max
-    #         f_levels = sorted(dc.freq_levels)
-    #         candidates_f = {f_levels[0], f_levels[-1], f_levels[len(f_levels) // 2]}
-    #         # ứng viên n: 1..rl_n_cand, cắt bởi free_gpus và policy.max_gpus_per_job
-    #         max_n = min(self.policy.max_gpus_per_job, dc.total_gpus)  # dùng total; lúc route chưa chắc free
-    #         for n in range(1, min(self.rl_n_cand, max_n) + 1):
-    #             for f in candidates_f:
-    #                 ddl = getattr(job, "deadline", None)
-    #                 if ddl is not None:
-    #                     tC = self.coeffs_map[(dc.name, job.jtype)][1]
-    #                     T_unit = step_time_s(n, f, tC)
-    #                     if T_unit * job.size > ddl:
-    #                         continue
-    #                 acts.append(RLAction(dc.name, n, f))
-    #     return acts
-
     def _rl_reallocate_training_jobs(self, dc: DataCenter, preempted_jobs: List[PreemptedJob]):
-        if self.algo not in ("rl_energy_upgr") or not self.rl:
+        if self.algo not in ("rl_energy_upgr") or not self.rl_upgr:
             return
 
         for preempted_job in preempted_jobs:
             job = preempted_job.job
-            
-            # if self.algo == "rl_energy":
-            #     state_map = {
-            #         dc.name: self._rl_build_state(dc, job, 0.0)
-            #     }
-            #     actions = self._rl_actions_for_job(job)
-            #     if actions:
-            #         a = self.rl.select_per_dc(state_map, actions)
-            #         job._rl_state0 = state_map[a.dc_name]
-            #         job._rl_action = a
-            #         n_rl = a.n
-            #         f_rl = a.f
-            #     else:
-            #         # Fallback to best energy frequency
-            #         pC, tC = self.coeffs_map[(dc.name, job.jtype)]
-            #         n_rl = 1  # Default to 1 GPU
-            #         f_rl = best_energy_freq(n_rl, dc.freq_levels, pC, tC)
-            #
-            # elif self.algo == "rl_energy_adv":
-            #     base_state = self._rl_build_state(dc, job, 0.0)
-            #     base_state["price_kwh"] = self._price_kwh(dc.name)
-            #     base_state["carbon_g_per_kwh"] = self.carbon.get(dc.name, 0.0)
-            #     cap_headroom = max(0.0, self.power_cap - self._estimate_dc_power(dc, getattr(dc, "current_freq", 1.0))) if self.power_cap > 0 else 0.0
-            #     base_state["cap_headroom_W"] = cap_headroom
-            #
-            #     actions = self._rl_actions_for_job(job)
-            #     if actions:
-            #         # Augment state for each action
-            #         state_map = {}
-            #         for a in actions:
-            #             s = dict(base_state)
-            #             pC, tC = self.coeffs_map[(dc.name, job.jtype)]
-            #             T_unit = step_time_s(a.n, a.f, tC)
-            #             P_est = task_power_w(a.n, a.f, pC)
-            #             s["t_unit"] = T_unit
-            #             s["p_est"] = P_est
-            #             s["e_unit"] = P_est * T_unit
-            #             state_map[dc.name] = s
-            #
-            #         a = self.rl.select_per_dc(state_map, actions)
-            #         job._rl_state0 = state_map[dc.name]
-            #         job._rl_action = a
-            #         n_rl = a.n
-            #         f_rl = a.f
-            #     else:
-            #         # Fallback to best energy frequency
-            #         pC, tC = self.coeffs_map[(dc.name, job.jtype)]
-            #         n_rl = 1
-            #         f_rl = best_energy_freq(n_rl, dc.freq_levels, pC, tC)
 
             if self.algo == "rl_energy_upgr" and (self.rl_upgr is not None):
                 # RL Upgr chỉ quyết định số GPU; f lấy theo energy-opt như joint_nf
@@ -658,62 +552,6 @@ class MultiIngressPaperSimulator:
             _, dc_name, Lnet, path, bottleneck, cost_sum, transfer_s, n_star, f_star = best
             job._eco_hint = (n_star, f_star)
 
-        # elif self.algo == "rl_energy" and getattr(self, "rl", None) is not None:
-        #     # build state per-DC + liệt kê action {(dc,n,f)}, chọn epsilon-greedy
-        #     state_map = {}
-        #     for dc in self.dcs.values():
-        #         Lnet, path, bottleneck, cost_sum, transfer_s = self._net_tuple(ing_name, dc.name, job)
-        #         state_map[dc.name] = self._rl_build_state(dc, job, Lnet)
-        #
-        #     actions = self._rl_actions_for_job(job)
-        #     if actions:
-        #         a = self.rl.select_per_dc(state_map, actions)
-        #         job._rl_state0 = state_map[a.dc_name]
-        #         job._rl_action = a
-        #         dc_name = a.dc_name
-        #         Lnet, path, bottleneck, cost_sum, transfer_s = self._net_tuple(ing_name, dc_name, job)
-        #     else:
-        #         # fallback: router cũ
-        #         dc_name = list(self.dcs.keys())[0]
-        #         Lnet, path, bottleneck, cost_sum, transfer_s = self._net_tuple(ing_name, dc_name, job)
-        #         data_gb = 0.05 if job.jtype == 'inference' else 5.0
-        #         xfer_s = (data_gb / bottleneck) if bottleneck > 0.0 else 0.0
-        #         transfer_s = Lnet + xfer_s
-        #         dc_name = list(self.dcs.keys())[0]
-        # elif self.algo == "rl_energy_adv" and getattr(self, "rl", None) is not None:
-        #     # Build state per-DC (base) + augment per-action (t_unit/p_est/e_unit, price/carbon/cap_headroom)
-        #     base_map = {}
-        #     for dc in self.dcs.values():
-        #         Lnet, path, bottleneck, cost_sum, transfer_s_tmp = self._net_tuple(ing_name, dc.name, job)
-        #         base = self._rl_build_state(dc, job, Lnet)
-        #         base["price_kwh"] = self._price_kwh(dc.name)
-        #         base["carbon_g_per_kwh"] = self.carbon.get(dc.name, 0.0)
-        #         cap_headroom = max(0.0, self.power_cap - self._estimate_dc_power(dc, getattr(dc, "current_freq",
-        #                                                                                      1.0))) if self.power_cap > 0 else 0.0
-        #         base["cap_headroom_W"] = cap_headroom
-        #         base_map[dc.name] = base
-        #
-        #     actions = self._rl_actions_for_job(job)
-        #     if actions:
-        #         # augment state theo từng action
-        #         state_map = {}
-        #         for a in actions:
-        #             s = dict(base_map[a.dc_name])
-        #             pC, tC = self.coeffs_map[(a.dc_name, job.jtype)]
-        #             T_unit = step_time_s(a.n, a.f, tC)
-        #             P_est = task_power_w(a.n, a.f, pC)
-        #             s["t_unit"] = T_unit
-        #             s["p_est"] = P_est
-        #             s["e_unit"] = P_est * T_unit
-        #             state_map[a.dc_name] = s
-        #         a = self.rl.select_per_dc(state_map, actions)
-        #         job._rl_state0 = state_map[a.dc_name]
-        #         job._rl_action = a
-        #         dc_name = a.dc_name
-        #         Lnet, path, bottleneck, cost_sum, transfer_s = self._net_tuple(ing_name, dc_name, job)
-        #     else:
-        #         dc_name = list(self.dcs.keys())[0]
-        #         Lnet, path, bottleneck, cost_sum, transfer_s = self._net_tuple(ing_name, dc_name, job)
         elif self.algo == "rl_energy_upgr" and (self.rl_upgr is not None):
             # Dùng RL Upgr để chọn DC + nGPU + freq
             obs = self._upgr_obs()
@@ -805,17 +643,6 @@ class MultiIngressPaperSimulator:
                         deadline_s=getattr(job, "deadline", None)
                     )
                 return self._start_job_with_nf(dc, job, n_star, f_star)
-            # elif self.algo == "rl_energy" and hasattr(job, "_rl_action"):
-            #     a: RLAction = job._rl_action
-            #     # khớp với thực tế free_gpus
-            #     n = max(1, min(a.n, dc.free_gpus, self.policy.max_gpus_per_job))
-            #     f = a.f
-            #     return self._start_job_with_nf(dc, job, n, f)
-            # elif self.algo == "rl_energy_adv" and hasattr(job, "_rl_action"):
-            #     a: RLAction = job._rl_action
-            #     n = max(1, min(a.n, dc.free_gpus, self.policy.max_gpus_per_job))
-            #     f = a.f
-            #     return self._start_job_with_nf(dc, job, n, f)
             elif self.algo == "rl_energy_upgr" and hasattr(job, "_upgr_action"):
                 a = job._upgr_action
                 # đảm bảo n không vượt free và policy
@@ -927,18 +754,6 @@ class MultiIngressPaperSimulator:
         }
         self.logger.debug({k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in rl_metrics.items()})
 
-        # # Gọi update cho RL (dựa trên metrics) nếu có RL và đã lưu state/action lúc start
-        # if self.algo in ("rl_energy", "rl_energy_adv") and (self.rl is not None) \
-        #         and hasattr(job, "_rl_action") and hasattr(job, "_rl_state0"):
-        #     next_state = self._rl_build_state(dc, job, 0.0)
-        #     next_actions = self._rl_actions_for_job(job)
-        #     # Dùng 'metrics' → agent tự tính reward (weighted hoặc constrained)
-        #     self.rl.update(
-        #         job._rl_state0, job._rl_action,
-        #         next_state=next_state, next_actions=next_actions,
-        #         done=True, metrics=rl_metrics
-        #     )
-
         # === Update RL Upgr ===
         if (self.algo == "rl_energy_upgr" and self.rl_upgr is not None and
                 hasattr(job, "_upgr_action") and hasattr(job, "_upgr_state0")):
@@ -1030,39 +845,6 @@ class MultiIngressPaperSimulator:
                 nxt = dc.q_train.pop(0)
             if nxt is None:
                 break
-
-            # if self.algo in ("rl_energy", "rl_energy_adv") and (self.rl is not None):
-            #     # Liệt kê action ứng viên trên tất cả DC còn GPU rảnh
-            #     actions = []
-            #     state_map = {}
-            #     for dname, d in self.dcs.items():
-            #         if d.free_gpus <= 0:
-            #             continue
-            #         nmax = min(d.free_gpus, self.policy.max_gpus_per_job)
-            #         for n_try in range(1, nmax + 1):
-            #             for f_try in d.freq_levels:
-            #                 actions.append(RLAction(dc_name=dname, n=n_try, f=float(f_try)))
-            #         # state cho DC này
-            #         state_map[dname] = self._rl_build_state(d, nxt, getattr(d, "current_freq", 1.0))
-            #
-            #     if not actions:
-            #         # không DC nào rảnh → trả job lại hàng đợi DC hiện tại và thoát
-            #         (dc.q_inf if nxt.jtype == 'inference' else dc.q_train).insert(0, nxt)
-            #         break
-            #
-            #     a = self.rl.select_per_dc(state_map, actions)
-            #     dc_tgt = self.dcs[a.dc_name]
-            #
-            #     # Nếu job đang ở DC khác, “chuyển” nó sang DC đích để khởi chạy
-            #     self._start_job_with_nf(dc_tgt, nxt, a.n, a.f)
-            #
-            #     # Lưu dấu vết cho update khi job kết thúc
-            #     nxt._rl_state0 = state_map[a.dc_name]
-            #     nxt._rl_action = a
-            #
-            #     # Nếu DC đích khác DC hiện tại, không thể tiếp tục lặp theo dc.free_gpus cũ
-            #     # → thoát vòng để tránh giả định về dc.free_gpus
-            #     break
 
             if self.algo == "rl_energy_upgr" and (self.rl_upgr is not None):
                 obs = self._upgr_obs()

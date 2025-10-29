@@ -197,16 +197,19 @@ def build_ingresses_and_topology():
 
     # Kết nối ingress <-> DC (latency minh họa, ms)
     # US West
+    # gw-us-west -> 16 H100 + 32 A100 + 16 H100 + 128 L4
     g.add_edge("gw-us-west", "us-west", 12)
     g.add_edge("us-west", "gw-us-west", 12)
     g.add_edge("gw-us-west", "us-east", 70)
     g.add_edge("us-east", "gw-us-west", 70)
+    g.add_edge("gw-us-west", "eu-central", 110)
     g.add_edge("gw-us-west", "eu-central", 110)
     g.add_edge("eu-central", "gw-us-west", 110)
     g.add_edge("gw-us-west", "ap-southeast", 150)
     g.add_edge("ap-southeast", "gw-us-west", 150)
 
     # US East
+    # gw-us-east -> 32 A100 + 16 H100-PCIe + 256 L40 +  512 A30
     g.add_edge("gw-us-east", "us-east", 10)
     g.add_edge("us-east", "gw-us-east", 10)
     g.add_edge("gw-us-east", "us-west", 70)
@@ -217,6 +220,7 @@ def build_ingresses_and_topology():
     g.add_edge("sa-east", "gw-us-east", 110)
 
     # EU West
+    # gw-eu-west -> 256 L40 + 16 H100-SXM + 32 A100 + 16 H200
     g.add_edge("gw-eu-west", "eu-west", 10)
     g.add_edge("eu-west", "gw-eu-west", 10)
     g.add_edge("gw-eu-west", "eu-central", 20)
@@ -227,6 +231,7 @@ def build_ingresses_and_topology():
     g.add_edge("ap-northeast", "gw-eu-west", 190)
 
     # EU Central
+    # gw-eu-central -> 16 H100-SXM + 512 A10 + 128 L4
     g.add_edge("gw-eu-central", "eu-central", 10)
     g.add_edge("eu-central", "gw-eu-central", 10)
     g.add_edge("gw-eu-central", "me-central", 60)
@@ -235,6 +240,7 @@ def build_ingresses_and_topology():
     g.add_edge("ap-southeast", "gw-eu-central", 170)
 
     # AP Southeast
+    # gw-ap-southeast -> 128 L4 + 16 H200 + 16 H100-SXM
     g.add_edge("gw-ap-southeast", "ap-southeast", 8)
     g.add_edge("ap-southeast", "gw-ap-southeast", 8)
     g.add_edge("gw-ap-southeast", "ap-northeast", 60)
@@ -243,6 +249,7 @@ def build_ingresses_and_topology():
     g.add_edge("eu-central", "gw-ap-southeast", 170)
 
     # AP Northeast
+    # gw-ap-northeast -> 16 H200 + 16 H100-PCIe + 256 L40
     g.add_edge("gw-ap-northeast", "ap-northeast", 8)
     g.add_edge("ap-northeast", "gw-ap-northeast", 8)
     g.add_edge("gw-ap-northeast", "us-west", 130)
@@ -251,6 +258,7 @@ def build_ingresses_and_topology():
     g.add_edge("eu-west", "gw-ap-northeast", 190)
 
     # SA East
+    # gw-sa-east -> 512 A30 + 32 A100 + 256 L40
     g.add_edge("gw-sa-east", "sa-east", 12)
     g.add_edge("sa-east", "gw-sa-east", 12)
     g.add_edge("gw-sa-east", "us-east", 110)
@@ -259,6 +267,7 @@ def build_ingresses_and_topology():
     g.add_edge("eu-west", "gw-sa-east", 150)
 
     # ME Central
+    # gw-me-central -> 512 A10 + 16 H100-SXM + 128 L4
     g.add_edge("gw-me-central", "me-central", 10)
     g.add_edge("me-central", "gw-me-central", 10)
     g.add_edge("gw-me-central", "eu-central", 60)
@@ -289,3 +298,26 @@ def build_energy_price():
         **{h: 0.20 for h in range(7, 19)},
         **{h: 0.16 for h in range(19, 24)}
     }
+
+# Name mapping
+dc_gpus_dict = {
+    "us-west" : "16 x H100-PCIe",
+    "us-east" : "32 x A100-PCIe",
+    "eu-west" : "256 x L40S",
+    "eu-central" : "16 x H100-SXM",
+    "ap-southeast" : "128 x L4",
+    "ap-northeast" : "16 x H200-PCIe",
+    "sa-east" : "512 x A30",
+    "me-central" : "512 x A10"
+}
+
+gw_alphabet_dict = {
+    "gw-us-west" : "A",
+    "gw-us-east" : "B",
+    "gw-eu-west" : "E",
+    "gw-eu-central" : "F",
+    "gw-ap-southeast" : "G",
+    "gw-ap-northeast" : "H",
+    "gw-sa-east" : "C",
+    "gw-me-central" : "D"
+}
