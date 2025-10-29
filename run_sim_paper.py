@@ -79,7 +79,7 @@ def parse_args():
                    choices=[
                        "baseline", "cap_uniform", "cap_greedy",
                        "joint_nf", "bandit", "carbon_cost",
-                       "eco_route", "rl_energy", "rl_energy_adv", "rl_energy_upgr",
+                       "eco_route", "rl_energy_upgr",
                        "debug"
                    ])
     p.add_argument(
@@ -98,20 +98,20 @@ def parse_args():
     p.add_argument("--eco-objective", type=str, default="energy",
                    choices=["energy", "carbon", "cost"],
                    help="Mục tiêu cho eco_route: energy = min năng lượng; carbon = min E*CI; cost = min E*kWh*price.")
-    # Hyperparams RL
-    p.add_argument("--rl-mode", type=str, default="weighted",
-                   choices=["weighted", "constrained"], help="Chế độ tính reward cho RL.")
-    p.add_argument("--rl-alpha", type=float, default=0.1, help="Tốc độ học Q-learning (α).")
-    p.add_argument("--rl-gamma", type=float, default=0.0, help="Hệ số chiết khấu (γ). 0.0 = contextual (1-step).")
-    p.add_argument("--rl-eps", type=float, default=0.2, help="Xác suất khám phá ε (epsilon-greedy).")
-    p.add_argument("--rl-eps-decay", type=float, default=0.995, help="Hệ số giảm ε mỗi lần cập nhật.")
-    p.add_argument("--rl-eps-min", type=float, default=0.02, help="Ngưỡng dưới của ε.")
-    p.add_argument("--rl-n-cand", type=int, default=2,
-                   help="Số mức n (GPU per job) ứng viên để agent chọn (1..n_cand).")
-    # upgraded RL
-    p.add_argument("--rl-tau", type=float, default=0.1, help="Nhiệt độ softmax (nhỏ → khai thác nhiều).")
-    p.add_argument("--rl-clip-grad", type=float, default=5.0, help="Ngưỡng clip gradient theo norm.")
-    p.add_argument("--rl-baseline-beta", type=float, default=0.01, help="Hệ số cập nhật baseline reward.")
+    # # Hyperparams RL
+    # p.add_argument("--rl-mode", type=str, default="weighted",
+    #                choices=["weighted", "constrained"], help="Chế độ tính reward cho RL.")
+    # p.add_argument("--rl-alpha", type=float, default=0.1, help="Tốc độ học Q-learning (α).")
+    # p.add_argument("--rl-gamma", type=float, default=0.0, help="Hệ số chiết khấu (γ). 0.0 = contextual (1-step).")
+    # p.add_argument("--rl-eps", type=float, default=0.2, help="Xác suất khám phá ε (epsilon-greedy).")
+    # p.add_argument("--rl-eps-decay", type=float, default=0.995, help="Hệ số giảm ε mỗi lần cập nhật.")
+    # p.add_argument("--rl-eps-min", type=float, default=0.02, help="Ngưỡng dưới của ε.")
+    # p.add_argument("--rl-n-cand", type=int, default=2,
+    #                help="Số mức n (GPU per job) ứng viên để agent chọn (1..n_cand).")
+    # # upgraded RL
+    # p.add_argument("--rl-tau", type=float, default=0.1, help="Nhiệt độ softmax (nhỏ → khai thác nhiều).")
+    # p.add_argument("--rl-clip-grad", type=float, default=5.0, help="Ngưỡng clip gradient theo norm.")
+    # p.add_argument("--rl-baseline-beta", type=float, default=0.01, help="Hệ số cập nhật baseline reward.")
 
     # debug params
     p.add_argument("--num_fixed_gpus", type=int, default=1, help="Số GPUs cố định cho 1 job.")
@@ -165,13 +165,13 @@ def main():
         algo=args.algo, elastic_scaling=elastic_scaling,
         power_cap=args.power_cap, control_interval=args.control_interval,
         show_progress=args.progress,
-        # RL params
-        rl_mode=args.rl_mode,
-        rl_alpha=args.rl_alpha, rl_gamma=args.rl_gamma,
-        rl_eps=args.rl_eps, rl_eps_decay=args.rl_eps_decay, rl_eps_min=args.rl_eps_min,
-        rl_n_cand=args.rl_n_cand,
-        # improved RL algo
-        rl_tau=args.rl_tau, rl_clip_grad=args.rl_clip_grad, rl_baseline_beta=args.rl_baseline_beta,
+        # # RL params
+        # rl_mode=args.rl_mode,
+        # rl_alpha=args.rl_alpha, rl_gamma=args.rl_gamma,
+        # rl_eps=args.rl_eps, rl_eps_decay=args.rl_eps_decay, rl_eps_min=args.rl_eps_min,
+        # rl_n_cand=args.rl_n_cand,
+        # # improved RL algo
+        # rl_tau=args.rl_tau, rl_clip_grad=args.rl_clip_grad, rl_baseline_beta=args.rl_baseline_beta,
         # upgraded RL alog
         energy_budget_j=args.energy_budget_j, sla_p99_ms=args.sla_p99_ms,
         upgr_batch=args.upgr_batch, upgr_warmup=args.upgr_warmup, upgr_buffer=args.upgr_buffer,

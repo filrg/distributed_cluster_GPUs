@@ -2,6 +2,15 @@ import math, random
 from dataclasses import dataclass
 
 
+def sample_job_size(jtype: str) -> float:
+    if jtype == 'inference':
+        xm, alpha = 1, 1.8 # 0.02, 2.5
+        u = max(1e-9, 1 - random.random())
+        return xm / (u ** (1 / alpha))
+    mu, sigma = math.log(50000), 0.4
+    return max(0.1, random.lognormvariate(mu, sigma))
+
+
 def expovariate_safe(lmbda: float) -> float:
     return float('inf') if lmbda <= 0 else random.expovariate(lmbda)
 
