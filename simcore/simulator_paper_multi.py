@@ -165,77 +165,6 @@ class MultiIngressPaperSimulator:
     def _pop(self):
         return heapq.heappop(self.event_q) if self.event_q else None
 
-    def _preempt_job(self, dc: DataCenter, job: Job, reason: str):
-        if job.jid not in dc.running_jobs:
-            return
-        job, gpus = dc.running_jobs.pop(job.jid)
-        self._advance_progress_to_now(dc, job, gpus)
-
-        preempt_ckpt = {
-            "units_done": job.units_done,
-            "f_used": job.f_used,
-            "gpus_assigned": gpus,
-        }
-        preempted = PreemptedJob(
-            job=job,
-            preempt_time=self.now,
-            reason=reason,
-            preempt_ckpt=preempt_ckpt
-        )
-        dc.preempted_jobs.append(preempted)
-
-        dc.busy_gpus -= gpus
-        job.preempt_count += 1
-
-    def _resume_preempted_job(self, dc: DataCenter, preempted: PreemptedJob, n_resume, f_resume):
-        job = preempted.job
-        if dc.free_gpus < n_resume:
-            return False
-        # Ckpt restore
-        job.units_done = preempted.preempt_ckpt["units_done"]
-        job.f_used = f_resume # job.f_used = preempted.preempt_ckpt["f_used"]
-        job.gpus_assigned = n_resume
-        job.last_update = self.now
-
-        preempt_duration = self.now - preempted.preempt_time
-        job.total_preempt_time += preempt_duration
-        # Resume
-        dc.busy_gpus += n_resume
-        dc.running_jobs[job.jid] = (job, n_resume)
-
-        units_left = max(0.0, job.units_total - job.units_done)
-        p_coeffs, t_coeffs = self.coeffs_map[(dc.name, job.jtype)]
-        T_unit = step_time_s(n_resume, f_resume, t_coeffs)
-        finish_time = units_left / max(1.0 / T_unit, 1e-9)
-
-        job.ev_gen += 1
-        self._schedule(self.now + finish_time, "job_finish",
-                       {'dc': dc.name, 'jid': job.jid, 'gen': job.ev_gen})
-        dc.preempted_jobs.remove(preempted)
-        self.logger.info(f"Resume job {job.jid} at {self._current_hour()}.")
-
-    def _should_reallocation(self, dc: DataCenter, job_type: str) -> bool:
-        """Re-allocate on train completion (only with elastic_scaling)"""
-        if job_type != "training":
-            return False
-        num_running_train_jobs = sum(1 for job, _ in dc.running_jobs.values() if job.jtype == "training")
-        return self.elastic_scaling and num_running_train_jobs > 1
-
-    def _preempt_all_training_jobs(self, dc: DataCenter, reason: str) -> List[PreemptedJob]:
-        """Preempted all training jobs and return list of it"""
-        preempted_jobs = []
-        running_train_jobs = []
-        # find all running training jobs
-        for jid, (job, gpus) in list(dc.running_jobs.items()):
-            if job.jtype == "training":
-                running_train_jobs.append((jid, job, gpus))
-        # preempt one by one
-        for jid, job, gpus in running_train_jobs:
-            self._preempt_job(dc, job, reason)
-            preempted = next((p for p in dc.preempted_jobs if p.job.jid == jid), None)
-            if preempted: preempted_jobs.append(preempted)
-        return preempted_jobs
-
     def _estimate_dc_power(self, dc: DataCenter, f: float) -> float:
         # Active (paper model)
         p_active = 0.0
@@ -407,6 +336,77 @@ class MultiIngressPaperSimulator:
         finish_in = units_left / max(rate_new, 1e-9)
         job.ev_gen += 1
         self._schedule(self.now + finish_in, 'job_finish', {'dc': dc.name, 'jid': job.jid, 'gen': job.ev_gen})
+
+    def _preempt_job(self, dc: DataCenter, job: Job, reason: str):
+        if job.jid not in dc.running_jobs:
+            return
+        job, gpus = dc.running_jobs.pop(job.jid)
+        self._advance_progress_to_now(dc, job, gpus)
+
+        preempt_ckpt = {
+            "units_done": job.units_done,
+            "f_used": job.f_used,
+            "gpus_assigned": gpus,
+        }
+        preempted = PreemptedJob(
+            job=job,
+            preempt_time=self.now,
+            reason=reason,
+            preempt_ckpt=preempt_ckpt
+        )
+        dc.preempted_jobs.append(preempted)
+
+        dc.busy_gpus -= gpus
+        job.preempt_count += 1
+
+    def _resume_preempted_job(self, dc: DataCenter, preempted: PreemptedJob, n_resume, f_resume):
+        job = preempted.job
+        if dc.free_gpus < n_resume:
+            return False
+        # Ckpt restore
+        job.units_done = preempted.preempt_ckpt["units_done"]
+        job.f_used = f_resume # job.f_used = preempted.preempt_ckpt["f_used"]
+        job.gpus_assigned = n_resume
+        job.last_update = self.now
+
+        preempt_duration = self.now - preempted.preempt_time
+        job.total_preempt_time += preempt_duration
+        # Resume
+        dc.busy_gpus += n_resume
+        dc.running_jobs[job.jid] = (job, n_resume)
+
+        units_left = max(0.0, job.units_total - job.units_done)
+        p_coeffs, t_coeffs = self.coeffs_map[(dc.name, job.jtype)]
+        T_unit = step_time_s(n_resume, f_resume, t_coeffs)
+        finish_time = units_left / max(1.0 / T_unit, 1e-9)
+
+        job.ev_gen += 1
+        self._schedule(self.now + finish_time, "job_finish",
+                       {'dc': dc.name, 'jid': job.jid, 'gen': job.ev_gen})
+        dc.preempted_jobs.remove(preempted)
+        self.logger.info(f"Resume job {job.jid} at {self._current_hour()}.")
+
+    def _should_reallocation(self, dc: DataCenter, job_type: str) -> bool:
+        """Re-allocate on train completion (only with elastic_scaling)"""
+        if job_type != "training":
+            return False
+        num_running_train_jobs = sum(1 for job, _ in dc.running_jobs.values() if job.jtype == "training")
+        return self.elastic_scaling and num_running_train_jobs > 1
+
+    def _preempt_all_training_jobs(self, dc: DataCenter, reason: str) -> List[PreemptedJob]:
+        """Preempted all training jobs and return list of it"""
+        preempted_jobs = []
+        running_train_jobs = []
+        # find all running training jobs
+        for jid, (job, gpus) in list(dc.running_jobs.items()):
+            if job.jtype == "training":
+                running_train_jobs.append((jid, job, gpus))
+        # preempt one by one
+        for jid, job, gpus in running_train_jobs:
+            self._preempt_job(dc, job, reason)
+            preempted = next((p for p in dc.preempted_jobs if p.job.jid == jid), None)
+            if preempted: preempted_jobs.append(preempted)
+        return preempted_jobs
 
     # --- run loop ---
     def run(self):

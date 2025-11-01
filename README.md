@@ -89,32 +89,11 @@ $$
 * `β_t` (s·(unit)·f) — phần tính toán **ngược tỉ lệ** với f (tăng f thì nhanh hơn).
 * `γ_t` (s/(unit·GPU)) — **phạt mở rộng** theo số GPU (đồng bộ, all-reduce…). Giá trị này **nhỏ**; nếu đặt lớn sẽ “giết” mọi lợi ích scale-out.
 
-### Job size
-* Inference: Phân phối Pareto với `xm` ~ scale tối thiểu, `alpha` ~ shape parameter (quyết định độ heavy-tailed).
-  * Theo lý thuyết, $\alpha \le 2$ thì Variance sẽ tiến đến vô cực.
-
-$$
-E[X] = \frac{\alpha x_m}{\alpha - 1}, \quad \alpha > 1
-$$
-
-$$
-Var[X] = \frac{\alpha x_m^2}{(\alpha-1)^2(\alpha-2)}, \quad \alpha > 2
-$$
-* Training: $X \sim \text{LogNormal}(\mu, \sigma^2)$
-
-$$
-E[X] = e^{\mu + \sigma^2 / 2}
-$$
-
-$$
-Var[X] = (e^{\sigma^2} - 1) \, e^{2\mu + \sigma^2}
-$$
-Tùy chỉnh các tham số để kiểm soát `service_time` hợp lý.
 
 ### Cách simulator dùng các hệ số
 
 * **Service time** của một job:
-  `service_time = job.size * T(n,f)` (trong code: `job.size` là số unit).
+  `service_time = job.size * step_time_s` (trong code: `job.size` là số unit).
 * **Công suất tức thời** khi job chạy:
   `P_job = n * P_gpu(f)`.
 * **Năng lượng dự đoán** (tiện log/so sánh):
@@ -236,6 +215,8 @@ python run_sim_paper.py \
 ```
 
 # Cách chạy với các thuật toán khác nhau
+- Khi chạy mô phỏng, mặc định tạo thư mục con **cùng tên thuật toán** để lưu log ở trong thư mục cha.
+  - Nếu **truyền cả thư mục con vào** thì sẽ lưu ở thư mục con đó.
 
 Danh sách các mode thuật toán được dựng từ các nghiên cứu:
 - `cap_uniform`, `cap_greedy`: Providing Load Flexiblity by Reshaping Power Profiles of Large Language Models.
@@ -338,11 +319,7 @@ python run_sim_paper.py --algo eco_route --eco-objective energy --duration 1200 
 ```
 
 ```bash
-python run_sim_paper.py --algo rl_energy --rl-alpha 0.1 --rl-gamma 0.0 --rl-eps 0.2 --rl-eps-decay 0.995 --rl-eps-min 0.02 --rl-n-cand 2 --duration 1200 --log-interval 5
-```
-
-```bash
-python run_sim_paper.py --algo rl_energy_adv --rl-alpha 0.1 --rl-gamma 0.1 --rl-eps 0.05 --rl-eps-decay 0.999 --rl-eps-min 0.01 --rl-tau 0.1 --rl-clip-grad 5.0 --rl-baseline-beta 0.01 --rl-n-cand 2
+python3 run_sim_paper.py --algo rl_energy_upgr --upgr-buffer 200000 --upgr-batch 256 --upgr-warmup 1000 --upgr-device cuda --sla_p99_ms 500.0 --elastic-scaling False --inf-mode off --trn-rate 0.02 --duration 604800 --log-interval 20 --log-path test_run_0.02/CHSAC-AF
 ```
 
 ## Vẽ đồ thị
@@ -365,25 +342,4 @@ python plot_single_algo.py --run baseline=./runs/baseline --run cap_greedy=./run
 * `--outdir`: nơi lưu hình.
 * `--bin`: kích thước bin (giây) cho biểu đồ throughput.
 * `--scaledown`: Bước nhảy khi đọc hàng trong log.
-
-
-### Log_path của mô phỏng
-- Khi chạy mô phỏng, mặc định tạo thư mục con **cùng tên thuật toán** để lưu log ở trong thư mục cha.
-  - Nếu **truyền cả thư mục con vào** thì sẽ lưu ở thư mục con đó.
-- Ví dụ: 
-```bash
-python run_sim_paper.py --algo debug --log-path results  # lưu log ở `results/debug/`
-```
-```bash
-python run_sim_paper.py --algo debug --log-path results/debug_1  # lưu log ở `results/debug_1/`
-```
-
-
-## Batch Script:
-- Các tham số phần CONFIG SECTION: 
-  - `SKIP_SIM`:
-    - `0`: chạy cả mô phỏng và vẽ hình.
-    - `1`: bỏ qua mô phỏng, chỉ vẽ hình từ tất cả các runs (tất cả các folder) hiện có.
-      - Tức, nếu chạy `SKIP_SIM = 1`, cần đảm bảo tất cả các folder trong folder cha đều là simulation runs. 
-  - Các tham số còn lại đều của mô phỏng chạy và vẽ đồ thị.
----
+* `--pdf`: Lưu hình dưới dạng pdf
