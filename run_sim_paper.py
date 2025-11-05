@@ -75,11 +75,11 @@ def parse_args():
     )
 
     # Thuật toán / controller
-    p.add_argument("--algo", type=str, default="baseline",
+    p.add_argument("--algo", type=str, default="default_policy",
                    choices=[
-                       "baseline", "cap_uniform", "cap_greedy",
+                       "default_policy", "cap_uniform", "cap_greedy",
                        "joint_nf", "bandit", "carbon_cost",
-                       "eco_route", "rl_energy_upgr",
+                       "eco_route", "chsac_af",
                        "debug"
                    ])
     p.add_argument(

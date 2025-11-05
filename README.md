@@ -1,43 +1,43 @@
-# Cấu hình
+# Configuration
 
-## Các loại GPU
+## f
 
 ```python
 @dataclass
 class GPUType:
-    name: str        # ví dụ: "A100-SXM4", "H100-PCIe"
-    p_idle: float    # W — công suất 1 GPU khi ở trạng thái rỗi (P0/P8 tuỳ cấu hình)
-    p_peak: float    # W — “đỉnh” mà mô hình baseline dùng cho phần động
-    p_sleep: float   # W — công suất khi GPU bị gate/ngủ (power-gating), không nhận job
-    alpha: float     # hệ số mũ cho DVFS trong mô hình baseline (P ~ f^alpha)
+    name: str        # Ex: "A100-SXM4", "H100-PCIe"
+    p_idle: float    # W — power of one GPU when idle (P0/P8 depending)
+    p_peak: float    # W — “peak” power used by baseline model for dynamic component
+    p_sleep: float   # W — power when GPU power-gated/sleep.
+    alpha: float     # exponent factor for DVFS in baseline model (P ~ f^alpha)
 ```
 
 * **`name`**
-  Ghi rõ **biến thể phần cứng** (SXM/PCIe, dung lượng HBM), vì công suất khác nhau. Ví dụ: `"A100-SXM4"`, `"H100-PCIe"`. Đừng ghi chung chung rồi kỳ vọng độ chính xác.
+  Specify the **hardware variants** (SXM/PCIe, HBM capacity) for better power consumption accuracy. Examples: `"A100-SXM4"`, `"H100-PCIe"`.
 
 * **`p_idle` (W)**
-  Công suất **một GPU** đang bật nhưng **không chạy** (no kernels). Trong baseline, khi GPU “bận” ta **cộng thêm** thành phần động, nên `p_idle` là nền tảng luôn tồn tại.
+  Power of **one GPU** turning on but **not running** (no kernels). In baseline, when the GPU is “busy” we **add** the dynamic component, so `p_idle` always exists.
   Note:
 
-  * Phụ thuộc driver/firmware, ECC, MIG, và “persistence mode”.
-  * Không có con số hãng công bố chuẩn.
+  * Depend on driver/firmware, ECC, MIG, and “persistence mode”.
+  * No standard numbers published by the manufacturer.
 
 * **`p_peak` (W)**
-  Trong **mô hình baseline** (file `simcore/energy.py`), công suất khi GPU hoạt động ở tần số chuẩn được tính:
+  In the **baseline model** (file `simcore/energy.py`), the power when the GPU is active at the nominal frequency:
 
   ```
   P_active ≈ p_idle + p_peak * (f ** alpha)
   ```
 
-  Ở đây `p_peak` là **biên độ phần động**, không nhất thiết đúng bằng TDP/TBP trên datasheet.
+  Here `p_peak` is the **dynamic component**, does not necessarily match TDP/TBP on datasheet.
 
 * **`p_sleep` (W)**
-  Công suất khi **power-gating** (DC có `power_gating=True`), tức “tắt” một phần phần cứng/đưa về P8 sâu. Dùng để mô phỏng tiết kiệm khi dồn tải và tắt bớt GPU.
+  Power when **power-gating** is active (DC has `power_gating=True`), meaning part of the hardware is "off" or in deep sleep mode (P8). Used to simulate power-saving when offloading and turning off GPUs.
 
 * **`alpha`**
-  Hệ số mũ cho DVFS trong baseline. Giá trị 2–3.5 thường hợp lý; 3.0 là mặc định.
+  Exponent factor for DVFS in baseline. Values between 2–3.5 is reasonable; default 3.0.
 
-**Ví dụ cấu hình**
+**Example configuration:**
 
 ```python
 A100_SXM  = GPUType("A100-SXM4",  p_idle=50.0, p_peak=(400.0), p_sleep=30.0, alpha=3.0)
@@ -45,301 +45,244 @@ H100_PCIe = GPUType("H100-PCIe",  p_idle=45.0, p_peak=(350.0), p_sleep=28.0, alp
 L4        = GPUType("L4",         p_idle=15.0, p_peak=(72.0),  p_sleep=8.0,  alpha=3.0)
 ```
 
-## Profile tiêu thụ công suất và thời gian
+## Power consumption and Time profile
 
-### `TrainPowerCoeffs(α_p, β_p, γ_p)` — mô hình công suất theo tần số
+### `TrainPowerCoeffs(α_p, β_p, γ_p)` — Power model based on frequency
 
-Công thức (mỗi **GPU**):
+For each **GPU**:
 
 $$
 P_{\text{gpu}}(f) = \alpha_p f^3 + \beta_p f + \gamma_p \quad\text{(W/GPU)}
 $$
 
-* `f` là **tần số chuẩn hoá** (ví dụ các mức `freq_levels = [0.5, 0.8, 1.0]`). Nếu dùng **GHz thực**, phải fit lại hệ số cho đúng đơn vị.
-* `α_p` (W) — thành phần **động** bậc ba theo f (phù hợp DVFS).
-* `β_p` (W) — thành phần động bậc một theo f (rò rỉ + phần tuyến tính).
-* `γ_p` (W) — **bù tĩnh** gần tương đương “idle offset” khi job đang chạy (khác `p_idle` của GPUType, vì đây là offset **trong** mô hình job).
+* `f` is **normalized frequency** (ví dụ các mức `freq_levels = [0.5, 0.8, 1.0]`). If using **GHz scale**, the coefficients must be refitted accordingly.
+* `α_p` (W) — cubic **dynamic** component on f (for DVFS).
+* `β_p` (W) — linear dynamic component on f (leak + linear part).
+* `γ_p` (W) — **static offset** close to “idle offset” when job is running (different from `p_idle` of GPUType, as this is offset **within** the job model).
 
-Điện năng cho **một job** dùng `n` GPU tại tần số `f`:
+Power consumption for **one job** using `n` GPU at frequency `f`:
 
 $$
 P_{\text{job}}(n,f)=n \cdot P_{\text{gpu}}(f)
 $$
 
-**Gợi ý fit:**
+**Fitting suggestion:**
+- Measure power consumption at different frequency levels when the job is running (stabilized for several seconds) → polynomial regression $(f^3, f, 1)$.
+- Constraints: $\alpha_p\ge0, \beta_p\ge0, \gamma_p\ge 0$.
 
-* Đo công suất theo nhiều mức f khi job chạy (ổn định vài giây) → hồi quy đa thức $(f^3, f, 1)$.
-* Ràng buộc hợp lý: $\alpha_p\ge0, \beta_p\ge0, \gamma_p\ge 0$.
+### `TrainLatencyCoeffs(α_t, β_t, γ_t)` — Time model for each "job unit"
 
-### `TrainLatencyCoeffs(α_t, β_t, γ_t)` — mô hình thời gian trên mỗi “đơn vị công việc”
-
-Công thức:
-
-Với $n=1$:
+For $n=1$:
 $$
 T(n,f) = \alpha_t + \frac{\beta_t}{f} \quad \text{(s / unit)}
 $$
-Với $n>1$:
+For $n>1$:
 $$
 T(n,f) = (\alpha_t + \frac{\beta_t}{f} + \gamma_t n) / n \quad \text{(s / unit)}
 $$
 
-* `unit` là **đơn vị công việc** người dùng định nghĩa trong simulator (ví dụ “một step training”, “một micro-batch”, hay “một batch inference cỡ b”).
-* `α_t` (s/unit) — overhead cố định (IO, setup).
-* `β_t` (s·(unit)·f) — phần tính toán **ngược tỉ lệ** với f (tăng f thì nhanh hơn).
-* `γ_t` (s/(unit·GPU)) — **phạt mở rộng** theo số GPU (đồng bộ, all-reduce…). Giá trị này **nhỏ**; nếu đặt lớn sẽ “giết” mọi lợi ích scale-out.
+* `unit` is the **job unit** defined in the simulator (e.g., “one step training”, “one micro-batch”, or “one batch inference of size b”).
+* `α_t` (s/unit) — fix overhead (IO, setup).
+* `β_t` (s·(unit)·f) — part that **inversely proportional** to f (increasing f makes it faster).
+* `γ_t` (s/(unit·GPU)) — **scaling penalty** by number of GPUs (synchronization, all-reduce…). Should be small, else will negate scale-out benefit.
 
 
-### Cách simulator dùng các hệ số
+### How simulator uses coefficients
 
-* **Service time** của một job:
-  `service_time = job.size * step_time_s` (trong code: `job.size` là số unit).
-* **Công suất tức thời** khi job chạy:
+* **Service time** of one job:
+  `service_time = job.size * step_time_s` (in code: `job.size` is the number of unit).
+* **Instantaneous power** when job is running:
   `P_job = n * P_gpu(f)`.
-* **Năng lượng dự đoán** (tiện log/so sánh):
+* **Predicted energy** (log/comparision):
   `E_pred = P_job * T(n,f)`.
 
-Các hệ số **không phụ thuộc** `GPUType.p_idle/p_sleep` — các số này chỉ dùng cho **GPU rảnh** (idle/sleep) ở mô hình DC. Khi job chạy, điện năng job đến từ `TrainPowerCoeffs`.
+Coefficients **do not depend** on `GPUType.p_idle/p_sleep` — these only used for **idle GPU** (idle/sleep) in DC level. When a job is running, its power comes from `TrainPowerCoeffs`.
 
-### Đơn vị & miền giá trị khuyến nghị
+
+### Units & Recommended Value Ranges
 
 * `f`
-
-  * **Khuyên dùng với giá trị chuẩn hoá**: $f\in(0,1]$, với 1.0 = mức “nominal”.
+  * **Recommend to normalized values**: $f\in(0,1]$, with 1.0 = “nominal”.
 * `P` (W), `T` (s/unit).
-* Ràng buộc:
+* Constraints:
 
   * $\alpha_p,\beta_p,\gamma_p \ge 0$.
-  * $\alpha_t,\beta_t \ge 0$; $\gamma_t \ge 0$ nhưng **nhỏ**.
-  * Đảm bảo $T(n,f)>0$ ở mọi mức dùng.
+  * $\alpha_t,\beta_t \ge 0$; $\gamma_t \ge 0$ but **small**.
+  * Ensure $T(n,f)>0$ at all usage levels.
 
-## Request đến
 
-Cấu trúc code:
+## Request/Arrival
+
+Code:
 ```python
 build_arrivals(
   inf_mode=args.inf_mode,   # "poisson" | "sinusoid" | "off"
-  inf_rate=args.inf_rate,   # float, đơn vị: yêu cầu/giây
-  inf_amp=args.inf_amp,     # float, biên độ dao động (chỉ dùng khi sinusoid)
-  inf_period=args.inf_period,# float, chu kỳ (giây, chỉ dùng khi sinusoid)
+  inf_rate=args.inf_rate,   # float (requests/second)
+  inf_amp=args.inf_amp,     # float, amplitude (for sinusoid)
+  inf_period=args.inf_period,# float, period (seconds, for sinusoid)
   trn_mode=args.trn_mode,   # "poisson" | "sinusoid"
-  trn_rate=args.trn_rate    # float, yêu cầu/giây
+  trn_rate=args.trn_rate    # float, requests/second
 )
 ```
 
-Khai báo **quy luật đến** (arrival process) cho hai luồng:
+Declare arrival process:
 
-* `inference` (ngắn, nhạy SLA)
-* `training` (dài, ít nhạy SLA, có thể bị preempt)
+* `inference` (short, SLA-sensitive)
+* `training` (long, less SLA-sensitive, preemptible)
 
-Simulator sẽ sinh **sự kiện đến** theo cấu hình này và đẩy vào router/DC.
+The simulator will generate **arrival events** based on this and push them to the router/DC.
 
-**Các tham số**
+**Arguments**
 
-* `*_mode`: kiểu tiến trình đến
-	* `"off"`: dùng để tắt train/inference nếu cần.
-    * `"poisson"`: tốc độ đến **không đổi** $\lambda$. Khoảng cách giữa hai arrival i.i.d. **mũ** ⇒ CV=1.
-	* `"sinusoid"`: tốc độ đến **thay đổi theo thời gian**:
+* `*_mode`: type of arrival
+	* `"off"`: turn off train/inference.
+    * `"poisson"`: **constant** arrival rate $\lambda$. Inter-arrival time is i.i.d. **exponential** ⇒ CV=1.
+	* `"sinusoid"`: arrival rate **varies by time**:
 
 $$
 \lambda(t)=\max\big(0,\ \text{rate}\cdot[1 + \text{amp}\cdot \sin(2\pi\, t/\text{period})]\big)
 $$
 
-  Dùng **thinning** để sinh arrival; biên dao động được kiểm soát bởi `amp`.
+  Using **thinning** to generate arrival; amplitude is controlled by `amp`.
 
-> Nếu workload phẳng lì thì cứ Poisson; còn đã có nhịp ngày/đêm, giờ cao điểm, sự kiện… thì Sinusoid.
+> If the workload is steady, use Poisson; if there's a day/night cycle, peak hours, other events ..., use Sinusoid.
 
-* `*_rate` (đơn vị: yêu cầu/giây)
-	* **Tốc độ trung bình** của tiến trình.
-	* Với sinusoid, **kỳ vọng** vẫn bằng `rate` (vì trung bình của sin bằng 0). Đừng ngộ nhận `amp` làm đổi tổng tải trung bình—nó chỉ **phân phối lại theo thời gian**.
+* `*_rate` (unit: requests/s)
+	* **Average speed** of the process.
+	* With sinusoid, **expected value** is still `rate` (average of sine is 0). Don't confuse `amp` as changing the total load—it only **redistributes over time**.
 
-* `inf_amp` (0…∞, chỉ sinusoid): **Biên độ tương đối**.
+* `inf_amp` (0…∞, only sinusoid): **Relative amplitude**.
 
-  * `0` ⇒ không dao động (quay về hằng).
-  * `0.6` ⇒ $\lambda(t)$ dao động ±60% quanh `rate`.
-  * > 1 vẫn được, phần âm sẽ bị **cắt về 0**. Nhưng hạn chế >1 nếu không muốn “cụt” pha thấp.
+  * `0` ⇒ no oscillation (constant).
+  * `0.6` ⇒ $\lambda(t)$ oscillates ±60% around `rate`.
+  * > 1 is allowed, but the negative part will be **clipped to 0**. Avoid >1 else “cut” low phases.
 
-* `inf_period` (giây, chỉ sinusoid). Chu kỳ của dao động. Ví dụ:
+* `inf_period` (seconds, only sinusoid). Oscillation period. Examples:
 
-  * `3600` ⇒ nhịp theo **giờ**,
-  * `86400` ⇒ **ngày/đêm**.
+  * `3600` ⇒ **hourly**,
+  * `86400` ⇒ **day/night**.
 
-* `trn_rate`, `trn_mode`. Tương tự phía inference nhưng cho **luồng training**. Thường để Poisson với tốc độ thấp (ví dụ `0.1–0.5 req/s`) để phản ánh job dài ít xuất hiện.
+* `trn_rate`, `trn_mode`. Similar usage to inference but for **training**. Usually Poisson with low arrival rate (`0.01–0.05 req/s`) to reflect heavy jobs that appear infrequently.
 
-## Cách simulator sinh arrival
+## Generating arrivals
 
-* **Poisson**: $\Delta \sim \text{Exp}(\lambda)$. Nếu `rate<=0` ⇒ **không có arrival** (trả `inf`).
-* **Sinusoid**: dùng **acceptance-rejection (thinning)** với $\lambda_{\max}=\text{rate}(1+|\text{amp}|)$. Sinh thời gian chờ từ Exp($\lambda_{\max}$), rồi **chấp nhận** với xác suất $\lambda(t)/\lambda_{\max}$.
+* **Poisson**: $\Delta \sim \text{Exp}(\lambda)$. If `rate<=0` ⇒ **no arrival** (return `inf`).
+* **Sinusoid**: use **acceptance-rejection (thinning)** với $\lambda_{\max}=\text{rate}(1+|\text{amp}|)$. Generate inter-arrival time ~ Exp($\lambda_{\max}$), then **accept** with probability $\lambda(t)/\lambda_{\max}$.
 
-* **Đơn vị**: mọi thứ đang là **yêu cầu/giây**, **chu kỳ theo giây**.
-* **Cân bằng tải**: tổng $\mathbb{E}[N]$ trong thời gian $T$ là `rate*T` cho sinusoid. Nếu không đạt target arrival trong log ⇒ lỗi nằm ở **service time** (T(n,f)) hoặc **router**, **không** phải ở `amp`.
-* **Burst**: Poisson **không** tạo “wave” dài; nếu cần lưu lượng lớn thay vì nhiễu lẻ tẻ, dùng sinusoid hoặc nạp **trace thực**.
+* **Unit**: **requests/s**, **period in seconds**.
+* **Load balancing**: total $\mathbb{E}[N]$ in time $T$ is `rate*T` for sinusoid. If the target arrival isn’t met in the log, the error lies in the service time ($T(n,f)$) or router, not in `amp`.
+* **Burst**: Poisson **does not** create long “wave”; if prefer high throughput instead of random bursts, use sinusoid or load **real trace**.
 
 
-### Công thức “ước lượng” để set tham số hợp lý
+### Estimating parameters
 
-Giả sử muốn inference **không quá tải**:
+If you want inference **no overloading**:
 
-* Mỗi GPU ở `f=1` xử lý được khoảng $\mu$ **unit/s** (từ `TrainLatencyCoeffs`), một job inference tiêu tốn $u$ unit trung bình.
-* Một DC có $G$ GPU, phân bổ trung bình $g$ GPU cho mỗi request inference.
-  ⇒ Năng lực gần bằng $\text{cap} \approx \dfrac{G}{g}\cdot\dfrac{\mu}{u}$ **req/s**.
-* Chọn `inf_rate` < **tổng** `cap` của các DC *mà router sẽ chọn tới*; nếu dùng sinusoid, đảm bảo **đỉnh** $\text{rate}(1+\text{amp})$ vẫn ≤ **tổng cap** hoặc chấp nhận hàng đợi.
+* Each GPU at `f=1` can handle about $\mu$ **unit/s** (from `TrainLatencyCoeffs`), an inference job consumes $u$ unit on average.
+* Each DC has $G$ GPU, allocates $g$ GPU for each request inference on average.
+  ⇒ Capacity $\text{cap} \approx \dfrac{G}{g}\cdot\dfrac{\mu}{u}$ **req/s**.
+* Set `inf_rate` < **total** `cap` of the DCs *that router will choose*; if using sinusoid, ensure **peak** $\text{rate}(1+\text{amp})$ ≤ **total cap** or accept queue.
 
-### Mẫu cấu hình
+### Arrival config
 
-1) Inference nhịp ngày/đêm, training lác đác
+1) Inference day/night cycle, training steady
 
 ```bash
 python run_sim_paper.py \
   --inf-mode sinusoid --inf-rate 4.0 --inf-amp 0.7 --inf-period 86400 \
-  --trn-mode poisson  --trn-rate 0.2 \
+  --trn-mode poisson  --trn-rate 0.02 \
   --duration 72000
 ```
 
-2) Căng tải giờ cao điểm 5 phút/lần, training êm
+2) High workload during peak hours every 5 minutes, training steady
 
 ```bash
 python run_sim_paper.py \
   --inf-mode sinusoid --inf-rate 6.0 --inf-amp 0.6 --inf-period 300 \
-  --trn-mode poisson  --trn-rate 0.3 \
+  --trn-mode poisson  --trn-rate 0.03 \
   --duration 1800
 ```
 
-3) Poisson phẳng để benchmark policy
+3) Poisson to benchmark policy
 
 ```bash
 python run_sim_paper.py \
   --inf-mode poisson --inf-rate 5.0 \
-  --trn-mode poisson --trn-rate 0.2 \
+  --trn-mode poisson --trn-rate 0.02 \
   --duration 1200
 ```
 
-# Cách chạy với các thuật toán khác nhau
-- Khi chạy mô phỏng, mặc định tạo thư mục con **cùng tên thuật toán** để lưu log ở trong thư mục cha.
-  - Nếu **truyền cả thư mục con vào** thì sẽ lưu ở thư mục con đó.
-
-Danh sách các mode thuật toán được dựng từ các nghiên cứu:
-- `cap_uniform`, `cap_greedy`: Providing Load Flexiblity by Reshaping Power Profiles of Large Language Models.
+# Algorithms
+List of algorithms implemented as baseline methods:
 - `joint_nf`: SLO-aware GPU Frequency Scaling for Energy Efficient LLM Inference Serving.
 - `bandit`: https://tor-lattimore.com/downloads/book/book.pdf
-- `carbon_cost`: Carbon-Aware Computing for Datacenters.
 
-## `baseline` (không hãm công suất)
+## `Default Policy` (DP)
 
-Không điều khiển nguồn; chỉ policy mặc định cấp phát GPU và ấn định một $f$ chung cho DC.
+No power control; only default policy allocates GPU and sets one fixed $f$ upon DC.
 
 ```bash
-python run_sim_paper.py --algo baseline \
+python run_sim_paper.py --algo default_policy \
   --duration 1200 --log-interval 5
 ```
 
-Kỳ vọng: `cluster_log.csv` cho thấy `freq` giữ nguyên; công suất chỉ thay đổi theo số job.
+Expected: `cluster_log.csv` shows that `freq` stays the same; power only changes by number of jobs.
 
-## `cap_uniform` (power-capping đồng loạt theo DC)
+Required turning on **per-job DVFS + reschedule**.
 
-Giảm $f$ từng nấc; mỗi vòng chọn **DC** có $\Delta P$ lớn nhất khi hạ một nấc.
+## `joint_nf` (JOINT-NF)
 
-```bash
-python run_sim_paper.py --algo cap_uniform \
-  --duration 1200 --log-interval 5 --power-cap 8000 --control-interval 2 
-```
-
-Kỳ vọng: tổng $P$ tiệm cận `--power-cap`. Nếu vượt cap không giảm tiếp, kiểm tra `freq_levels` và còn “nấc” để hạ không. (Cơ chế chọn theo bước DVFS dựa trên ý tưởng điểm biên.
-
-## `cap_greedy` (aggregate-based, cấp **job**)
-
-Xây atoms per-job (bước $f_i\to f_{i-1}$ với $\Delta P,\Delta V$), sắp theo $\Delta P/\Delta V$, rồi **đánh vào job rẻ nhất** cho tới khi bù xong thâm hụt so với cap.
-
-```bash
-python run_sim_paper.py --algo cap_greedy \
-  --duration 1200 --log-interval 5 --power-cap 8000 --control-interval 2
-```
-
-Yêu cầu: đã bật **per-job DVFS + reschedule**. Nếu chưa, hành vi sẽ gần `cap_uniform`. (Thuật toán bám đúng aggregation từ khung trong paper.
-
-## `joint_nf` (tối ưu đồng thời số GPU & tần số theo SLO)
-
-Mỗi khi job sẵn sàng chạy, duyệt lưới $n \in [1 .. N_{\max}], f \in \text{freq\_levels}$; chọn nghiệm **min năng lượng** (hoặc carbon/cost) **thoả SLA**.
+Upon arrival, conduct a grid search $n \in [1 .. N_{\max}], f \in \text{freq\_levels}$; choose **min energy** configuration (or carbon/cost) which **satisfies SLA**.
 
 ```bash
 python run_sim_paper.py --algo joint_nf \
   --duration 1200 --log-interval 5
 ```
 
-Gợi ý:
+Suggest:
 
-* Gán `job.deadline` cho inference nếu muốn ràng buộc SLO.
-* Hệ số $T(n,f)$ phải hợp lý.
-  Cơ sở lựa chọn: DVFS-aware, SLO-aware scaling trên LLM cho thấy tồn tại điểm tốt (vd. \~1050 MHz trên A100) đem lại +\~37% hiệu quả năng lượng với ảnh hưởng hiệu năng nhỏ.
+* Assign `job.deadline` for inference if SLO constraints.
+* Coefficients $T(n,f)$ should be acceptable.
+  As DVFS-aware, SLO-aware scaling on LLM shows a "sweet spot" (e.g., \~1050 MHz on A100) brings +\~37% energy efficiency with negligible impact on performance.
 
 ## `bandit` (UCB1)
 
-Mỗi DC/job_type xem mỗi $f$ là một arm. Khi job tới: **chọn** $f$ theo UCB1; khi job xong: **cập nhật** reward = −(năng lượng/đơn vị). Không cần mô hình chính xác, tự thích nghi theo workload.
+Each DC/job_type treats each $f$ as an arm. Upon arrival: **select** $f$ using UCB1; when the job finishes: **update** reward = −(energy per unit). No need for an exact model, it can adapt to the workload.
 
 ```bash
 python run_sim_paper.py --algo bandit \
   --duration 1200 --log-interval 5
 ```
 
-Gợi ý:
+Suggest:
 
-* Đặt `init_explore=1` (mặc định trong learner) để thử qua mọi $f$.
-* Reward có thể chuyển sang **carbon** (−E·CI) hoặc **cost** (−E·price).
-  Lý thuyết UCB1 và biến thể (UCB1-Tuned) là nền tảng kinh điển cho tối ưu thăm-dò/khai-thác.
+* Set `init_explore=1` (default in learner) to explore all $f$.
+* Reward focus can be **carbon** (−E·CI) or **cost** (−E·price).
 
-## `carbon_cost` (carbon-/cost-aware)
-
-Chọn $n,f$ sao cho **min** $E\cdot\text{CI(dc)}$ **hoặc** $(E/3.6\text{e}6)\cdot\text{price(dc, hour)}$.
-(Ở tầng routing có thể đi theo DC có CI thấp — Carbon-Intelligent Compute.)
+## Our algorithm `CHSAC-AF`
 
 ```bash
-python run_sim_paper.py --algo carbon_cost \
-  --duration 1200 --log-interval 5
+python3 run_sim_paper.py --algo chsac_af --upgr-buffer 200000 --upgr-batch 256 --upgr-warmup 1000 --upgr-device cuda --sla_p99_ms 500.0 --inf-mode off --trn-rate 0.02 --duration 604800 --log-interval 20 --log-path test_run_0.02/CHSAC-AF
 ```
 
-## `debug` Cố định $n,f$
-Cố định $n,f$ cho các job, hiện dùng để kiểm tra hành vi DC chỉ training jobs: 
-* `--num_fixed_gpus` (default = `1`): Số GPUs cố định gán cho 1 job.
-* `--fixed_freq` (default = `None`): Tần số GPU cố định gán cho 1 job.
-  * Mặc định `None` sẽ chọn `best_energy_freq` với $n$ xác định.
-  * `best_energy_freq` **có thể thay đổi theo từng job**.
+## Plot
 
-```bash
-python run_sim_paper.py --algo debug --num_fixed_gpus 1 \
---inf-mode off --trn-mode poisson --trn-rate 0.02 --duration 86400 --log-interval 10
-```
-
-## Our algorithm
-
-* `--elastic-scaling` (default = `False`): hiện chỉ dùng cho **RL** - Tác nhân sẽ preempt và phân bổ lại tài nguyên cho training jobs sau mỗi sự kiện training job completion. 
-  * Qua thực nghiệm thấy (implement) chưa hiệu quả, làm tăng hàng đợi nhiều.
-
-```bash
-python run_sim_paper.py --algo eco_route --eco-objective energy --duration 1200 --log-interval 5
-```
-
-```bash
-python3 run_sim_paper.py --algo rl_energy_upgr --upgr-buffer 200000 --upgr-batch 256 --upgr-warmup 1000 --upgr-device cuda --sla_p99_ms 500.0 --elastic-scaling False --inf-mode off --trn-rate 0.02 --duration 604800 --log-interval 20 --log-path test_run_0.02/CHSAC-AF
-```
-
-## Vẽ đồ thị
-
-Mỗi run (một cấu hình/thuật toán) để trong một thư mục có:
+Each run (by config/algorithm) is placed in a folder that consists of:
 
 * `cluster_log.csv`
 * `job_log.csv`
 
-So sánh các thuật toán
+Comparing algorithms
 ```bash
 python plot_sim_result.py --run baseline=./runs/baseline --run cap_greedy=./runs/cap_greedy --run carbon=./runs/carbon_cost --outdir ./figs --bin 5
 ```
-Trong một thuật toán
+Single algorithm 
 ```bash
 python plot_single_algo.py --run baseline=./runs/baseline --run cap_greedy=./runs/cap_greedy --run carbon=./runs/carbon_cost --outdir ./debug_figs --bin 5
 ```
 
-* `NAME=DIR`: tên muốn hiển thị trên legend và thư mục chứa CSV. Ví dụ: baseline=./runs/baseline
-* `--outdir`: nơi lưu hình.
-* `--bin`: kích thước bin (giây) cho biểu đồ throughput.
-* `--scaledown`: Bước nhảy khi đọc hàng trong log.
-* `--pdf`: Lưu hình dưới dạng pdf
+* `NAME=DIR`: The name to display on the legend and the folder containing the CSV. For example: baseline=./runs/baseline
+* `--outdir`: Directory to save the plots.
+* `--bin`: The bin size (in seconds) for the throughput chart.
+* `--scaledown`: The step size when reading rows from the log.
+* `--pdf`: Save the plot as PDF.

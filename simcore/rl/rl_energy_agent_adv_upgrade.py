@@ -7,7 +7,7 @@ from simcore.rl.utils import FreqBounds
 from simcore.rl.cmdp_wrapper import LagrangianCMDP, ConstraintSpec
 
 
-class RLEnergyAgentAdvUpgr:
+class CHSAC_AF:
     """Khung agent nâng cấp hoà nhập với môi trường hiện tại.
     Giả định env cung cấp:
         - obs vector hoá (đã concat preference nếu cần)

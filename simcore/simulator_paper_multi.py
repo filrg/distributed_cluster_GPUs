@@ -10,7 +10,7 @@ from .router import RouterPolicy
 from .energy_paper import task_power_w
 from .learners import BanditDVFS
 from .freq_load_agg import TaskState, aggregate_with_atoms
-from simcore.rl.rl_energy_agent_adv_upgrade import RLEnergyAgentAdvUpgr
+from simcore.rl.rl_energy_agent_adv_upgrade import CHSAC_AF
 from simcore.rl.replay import ReplayBuffer, Transition
 
 try:
@@ -44,7 +44,7 @@ class MultiIngressPaperSimulator:
                  log_interval: float = 10.0,
                  log_path: str = None,
                  rng_seed: int = 42,
-                 algo: str = "baseline",
+                 algo: str = "default_policy",
                  elastic_scaling: bool = False,
                  power_cap: float = 0.0,
                  energy_budget_j: float = 0.0,
@@ -79,7 +79,7 @@ class MultiIngressPaperSimulator:
             self.job_log_path = os.path.join(log_path, "job_log.csv")
 
         self.algo = algo
-        self.elastic_scaling = elastic_scaling and self.algo in ("rl_energy_upgr")
+        self.elastic_scaling = elastic_scaling and self.algo in ("chsac_af")
         # self.rl = None
         # self.rl_n_cand = int(rl_n_cand)
 
@@ -90,7 +90,7 @@ class MultiIngressPaperSimulator:
 
         # === RL Upgraded mode ===
         self.rl_upgr = None
-        if self.algo == "rl_energy_upgr":
+        if self.algo == "chsac_af":
             # danh sách DC cố định để map chỉ số <-> tên
             self._dc_names: List[str] = list(self.dcs.keys())
 
@@ -113,7 +113,7 @@ class MultiIngressPaperSimulator:
                 constraints["energy_total"] = float(self.energy_budget_j)
             constraints["gpu_over"] = 0.0
 
-            self.rl_upgr = RLEnergyAgentAdvUpgr(
+            self.rl_upgr = CHSAC_AF(
                 obs_dim=self._obs_dim,
                 n_dc=len(self._dc_names),
                 n_g_choices=self._n_g_choices,
@@ -215,7 +215,7 @@ class MultiIngressPaperSimulator:
         if self.power_cap <= 0:
             return
 
-        algo = getattr(self, "algo", "baseline")
+        algo = getattr(self, "algo", "default_policy")
         if algo not in ("cap_uniform", "cap_greedy"):
             # (tuỳ chọn) vài heuristic nhẹ cho các algo khác
             if algo in ("eco_route", "carbon_cost"):
@@ -496,13 +496,13 @@ class MultiIngressPaperSimulator:
         return Lnet_s, path, bottleneck, cost_sum, transfer_s
 
     def _rl_reallocate_training_jobs(self, dc: DataCenter, preempted_jobs: List[PreemptedJob]):
-        if self.algo not in ("rl_energy_upgr") or not self.rl_upgr:
+        if self.algo not in ("chsac_af") or not self.rl_upgr:
             return
 
         for preempted_job in preempted_jobs:
             job = preempted_job.job
 
-            if self.algo == "rl_energy_upgr" and (self.rl_upgr is not None):
+            if self.algo == "chsac_af" and (self.rl_upgr is not None):
                 # RL Upgr chỉ quyết định số GPU; f lấy theo energy-opt như joint_nf
                 obs = self._upgr_obs()
                 m_dc, m_g = self._upgr_masks()
@@ -552,7 +552,7 @@ class MultiIngressPaperSimulator:
             _, dc_name, Lnet, path, bottleneck, cost_sum, transfer_s, n_star, f_star = best
             job._eco_hint = (n_star, f_star)
 
-        elif self.algo == "rl_energy_upgr" and (self.rl_upgr is not None):
+        elif self.algo == "chsac_af" and (self.rl_upgr is not None):
             # Dùng RL Upgr để chọn DC + nGPU + freq
             obs = self._upgr_obs()
             m_dc, m_g = self._upgr_masks()
@@ -643,7 +643,7 @@ class MultiIngressPaperSimulator:
                         deadline_s=getattr(job, "deadline", None)
                     )
                 return self._start_job_with_nf(dc, job, n_star, f_star)
-            elif self.algo == "rl_energy_upgr" and hasattr(job, "_upgr_action"):
+            elif self.algo == "chsac_af" and hasattr(job, "_upgr_action"):
                 a = job._upgr_action
                 # đảm bảo n không vượt free và policy
                 n = max(1, min(a["n"], dc.free_gpus, self.policy.max_gpus_per_job))
@@ -755,7 +755,7 @@ class MultiIngressPaperSimulator:
         self.logger.debug({k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in rl_metrics.items()})
 
         # === Update RL Upgr ===
-        if (self.algo == "rl_energy_upgr" and self.rl_upgr is not None and
+        if (self.algo == "chsac_af" and self.rl_upgr is not None and
                 hasattr(job, "_upgr_action") and hasattr(job, "_upgr_state0")):
             # TODO Mode 1
             # r = - (float(rl_metrics["energy_kwh"]) / (float(rl_metrics["units_processed"] + 1e-9)))
@@ -846,7 +846,7 @@ class MultiIngressPaperSimulator:
             if nxt is None:
                 break
 
-            if self.algo == "rl_energy_upgr" and (self.rl_upgr is not None):
+            if self.algo == "chsac_af" and (self.rl_upgr is not None):
                 obs = self._upgr_obs()
                 m_dc, m_g = self._upgr_masks()
                 obs_t = torch.from_numpy(obs).float().unsqueeze(0)
