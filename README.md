@@ -73,10 +73,13 @@ $$
 ### `TrainLatencyCoeffs(α_t, β_t, γ_t)` — Time model for each "job unit"
 
 For $n=1$:
+
 $$
 T(n,f) = \alpha_t + \frac{\beta_t}{f} \quad \text{(s / unit)}
 $$
+
 For $n>1$:
+
 $$
 T(n,f) = (\alpha_t + \frac{\beta_t}{f} + \gamma_t n) / n \quad \text{(s / unit)}
 $$
@@ -93,7 +96,7 @@ $$
   `service_time = job.size * step_time_s` (in code: `job.size` is the number of unit).
 * **Instantaneous power** when job is running:
   `P_job = n * P_gpu(f)`.
-* **Predicted energy** (log/comparision):
+* **Predicted energy** (log/comparison):
   `E_pred = P_job * T(n,f)`.
 
 Coefficients **do not depend** on `GPUType.p_idle/p_sleep` — these only used for **idle GPU** (idle/sleep) in DC level. When a job is running, its power comes from `TrainPowerCoeffs`.
@@ -232,7 +235,7 @@ Required turning on **per-job DVFS + reschedule**.
 
 ## `joint_nf` (JOINT-NF)
 
-Upon arrival, conduct a grid search $n \in [1 .. N_{\max}], f \in \text{freq\_levels}$; choose **min energy** configuration (or carbon/cost) which **satisfies SLA**.
+Upon arrival, conduct a grid search $n \in [1 .. N\_max], f \in \text{freq_levels}$; choose **min energy** configuration (or carbon/cost) which **satisfies SLA**.
 
 ```bash
 python run_sim_paper.py --algo joint_nf \
