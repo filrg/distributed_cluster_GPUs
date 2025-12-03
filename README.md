@@ -93,7 +93,7 @@ $$
 ### How simulator uses coefficients
 
 * **Service time** of one job:
-  `service_time = job.size * step_time_s` (in code: `job.size` is the number of unit).
+  `service_time = job.size * step_time_s` (`job.size` is the number of unit).
 * **Instantaneous power** when job is running:
   `P_job = n * P_gpu(f)`.
 * **Predicted energy** (log/comparison):
@@ -104,8 +104,7 @@ Coefficients **do not depend** on `GPUType.p_idle/p_sleep` — these only used f
 
 ### Units & Recommended Value Ranges
 
-* `f`
-  * **Recommend to normalized values**: $f\in(0,1]$, with 1.0 = “nominal”.
+* `f`: **Recommend to normalized values**: $f\in(0,1]$, with 1.0 = “nominal”.
 * `P` (W), `T` (s/unit).
 * Constraints:
 
@@ -245,7 +244,7 @@ python run_sim_paper.py --algo joint_nf \
 Suggest:
 
 * Assign `job.deadline` for inference if SLO constraints.
-* Coefficients $T(n,f)$ should be acceptable.
+* Coefficients of $T(n,f)$ should be acceptable.
   As DVFS-aware, SLO-aware scaling on LLM shows a "sweet spot" (e.g., \~1050 MHz on A100) brings +\~37% energy efficiency with negligible impact on performance.
 
 ## `bandit` (UCB1)
@@ -270,10 +269,7 @@ python3 run_sim_paper.py --algo chsac_af --upgr-buffer 200000 --upgr-batch 256 -
 
 ## Plot
 
-Each run (by config/algorithm) is placed in a folder that consists of:
-
-* `cluster_log.csv`
-* `job_log.csv`
+Each run (by config/algorithm) is placed in a folder that consists of `cluster_log.csv` and `job_log.csv`.
 
 Comparing algorithms
 ```bash

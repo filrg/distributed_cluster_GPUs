@@ -85,7 +85,6 @@ def build_paper_coeffs(dcs) -> Dict[tuple, tuple]:
     coeffs = {}
 
     # us-west: H100-PCIe (high-end)
-    # tweak back to first coeff, last time adjustment due to wrong latency/computing performance model
     coeffs[("us-west", "training")] = (
         TrainPowerCoeffs(75.0, 80.0, 110.0),
         TrainLatencyCoeffs(0.0045, 0.032, 0.0012) # single DC config: (0.0005, 0.05, 0.0003)
