@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 from typing import Iterable, List
-from .coeffs import TrainPowerCoeffs, TrainLatencyCoeffs
-from .latency_paper import step_time_s
-from .energy_paper import task_power_w
+from simcore.models.gpu.coeffs import TrainPowerCoeffs, TrainLatencyCoeffs
+from simcore.models.gpu.latency_paper import step_time_s
+from simcore.models.gpu.energy_paper import task_power_w
 
 
 @dataclass

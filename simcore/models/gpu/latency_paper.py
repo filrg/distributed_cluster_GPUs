@@ -1,4 +1,4 @@
-from .coeffs import TrainLatencyCoeffs
+from simcore.models.gpu.coeffs import TrainLatencyCoeffs
 
 
 def step_time_s(n_gpus: int, f_ghz: float, coeffs: TrainLatencyCoeffs) -> float:

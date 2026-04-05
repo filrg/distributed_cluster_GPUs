@@ -1,7 +1,7 @@
 from typing import Iterable, Tuple
-from .coeffs import TrainPowerCoeffs, TrainLatencyCoeffs
-from .energy_paper import gpu_power_w, task_power_w
-from .latency_paper import step_time_s
+from simcore.models.gpu.coeffs import TrainPowerCoeffs, TrainLatencyCoeffs
+from simcore.models.gpu.energy_paper import gpu_power_w, task_power_w
+from simcore.models.gpu.latency_paper import step_time_s
 
 
 def best_energy_freq(n: int, freq_levels: Iterable[float],

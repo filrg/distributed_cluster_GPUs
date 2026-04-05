@@ -4,7 +4,7 @@ from configs.paper_config import (
     build_dcs, build_arrivals, build_policy, build_paper_coeffs,
     build_ingresses_and_topology, build_carbon_intensity, build_router_policy, build_energy_price
 )
-from simcore.validators import validate_gpus
+from simcore.models.gpu.validators import validate_gpus
 from simcore.logger_config import get_logger
 
 

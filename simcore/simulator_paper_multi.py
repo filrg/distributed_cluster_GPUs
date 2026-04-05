@@ -1,15 +1,17 @@
 import csv, heapq, itertools, random, os, numpy as np, torch
+from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Union
-from .models import Job, DataCenter, PreemptedJob
-from .arrivals import ArrivalConfig, sample_job_size
+from simcore.models.datacenter.datacenter import DataCenter
+from simcore.models.job import Job, PreemptedJob
+from simcore.workload.arrivals import ArrivalConfig, sample_job_size
 from .policy import PolicyConfig, select_gpus_and_set_freq
-from .latency_paper import step_time_s
+from simcore.models.gpu.latency_paper import step_time_s
 from .policy_paper import energy_tuple, best_nf_grid, best_energy_freq
-from .network import Ingress, Graph
+from simcore.models.network import Ingress, Graph
 from .router import RouterPolicy
-from .energy_paper import task_power_w
-from .learners import BanditDVFS
-from .freq_load_agg import TaskState, aggregate_with_atoms
+from simcore.models.gpu.energy_paper import task_power_w
+from simcore.algo.UCB1 import BanditDVFS
+from simcore.algo.power_cap import run_power_cap_control
 from simcore.rl.rl_energy_agent_adv_upgrade import CHSAC_AF
 from simcore.rl.replay import ReplayBuffer, Transition
 
@@ -19,6 +21,15 @@ except Exception:
     tqdm = None
 
 Event = Tuple[float, int, str, dict]
+
+
+@dataclass
+class StartPlan:
+    """Start plan for a job, rl_trace used for RL training after job finished"""
+    dc: DataCenter
+    n_gpus: int
+    freq: Optional[float] = None
+    rl_trace: Optional[dict] = None
 
 
 class MultiIngressPaperSimulator:
@@ -178,141 +189,8 @@ class MultiIngressPaperSimulator:
         p_idle = idle * (gt.p_sleep if dc.power_gating else gt.p_idle)
         return p_active + p_idle
 
-    def _cap_uniform(self, deficit: float):
-        """Giảm f theo bước rời rạc, mỗi bước chọn DC có ∆P lớn nhất."""
-        iter_guard = 10000
-        while deficit > 1e-6 and iter_guard > 0:
-            iter_guard -= 1
-            best_dc, best_dp, best_next_f = None, 0.0, None
-            for dc in self.dcs.values():
-                levels = dc.freq_levels
-                # snap index
-                try:
-                    idx = levels.index(dc.current_freq)
-                except ValueError:
-                    idx = min(range(len(levels)), key=lambda i: abs(levels[i] - dc.current_freq))
-                if idx == 0:
-                    continue
-                f_now, f_lo = levels[idx], levels[idx - 1]
-                p_now = self._estimate_dc_power(dc, f_now)
-                p_lo = self._estimate_dc_power(dc, f_lo)
-                dp = p_now - p_lo
-                if dp > best_dp + 1e-9:
-                    best_dc, best_dp, best_next_f = dc, dp, f_lo
-            if not best_dc or best_dp <= 1e-9:
-                break
-            best_dc.current_freq = best_next_f
-            deficit -= best_dp
-
     def _control(self):
-        """
-        Power-cap controller:
-          - cap_uniform: hạ đồng loạt theo DC, mỗi bước chọn DC có ∆P lớn nhất.
-          - cap_greedy : hạ theo 'atoms' per-job (từ aggregate), tái-ước-lượng sau mỗi bước.
-        Có hysteresis nhỏ để tránh rung quanh power_cap.
-        """
-        # Chỉ chạy khi cần
-        if self.power_cap <= 0:
-            return
-
-        algo = getattr(self, "algo", "default_policy")
-        if algo not in ("cap_uniform", "cap_greedy"):
-            # (tuỳ chọn) vài heuristic nhẹ cho các algo khác
-            if algo in ("eco_route", "carbon_cost"):
-                # hạ f về min khi DC rảnh để giảm idle power
-                for dc in self.dcs.values():
-                    if dc.busy_gpus == 0 and dc.freq_levels:
-                        dc.current_freq = min(dc.freq_levels)
-            return
-
-        # 1) Ước lượng tổng P hiện tại
-        totalP = 0.0
-        for dc in self.dcs.values():
-            f_now = getattr(dc, "current_freq", 1.0)
-            totalP += self._estimate_dc_power(dc, f_now)
-
-        # Hysteresis: nếu đã dưới cap một chút thì thôi
-        cap_margin = getattr(self, "cap_margin", 5.0)  # W
-        if totalP <= self.power_cap - cap_margin:
-            return
-
-        # Thâm hụt cần cắt
-        deficit = max(0.0, totalP - self.power_cap)
-        if deficit <= 1e-6:
-            return
-
-        # 2) Nhánh cap_uniform: gọi hàm sẵn có
-        if algo == "cap_uniform":
-            return self._cap_uniform(deficit)
-
-        iter_guard = 10000  # van an toàn, tránh vòng vô tận
-        while deficit > 1e-6 and iter_guard > 0:
-            iter_guard -= 1
-
-            # 3.1 Gom tasks (bỏ qua DC không có freq_levels hoặc job đã ở f min)
-            tasks = []
-            for dc in self.dcs.values():
-                levels = getattr(dc, "freq_levels", None) or []
-                if not levels:
-                    continue
-                f_min = min(levels)
-                for job, g in list(dc.running_jobs.values()):
-                    pC, tC = self.coeffs_map[(dc.name, job.jtype)]
-                    cur_f = getattr(job, "f_used", 0.0) or dc.current_freq
-                    if cur_f <= f_min + 1e-12:
-                        continue  # không còn nấc để hạ
-                    tasks.append(TaskState(job_id=job.jid, dc_name=dc.name,
-                                           n=g, f=cur_f, freq_levels=levels,
-                                           p_coeffs=pC, t_coeffs=tC))
-
-            if not tasks:
-                break
-
-            # 3.2 Lấy danh sách atoms "đi xuống" đã sắp xếp theo ưu tiên (∆P/∆V) từ aggregate
-            try:
-                _, down_atoms = aggregate_with_atoms(tasks)
-            except Exception:
-                break
-            if not down_atoms:
-                break
-
-            applied_any = False
-
-            # 3.3 Áp dụng lần lượt atoms cho tới khi hết deficit
-            for atom in down_atoms:
-                if deficit <= 1e-6:
-                    break
-
-                dc = self.dcs.get(atom.dc_name)
-                if dc is None:
-                    continue
-                tup = dc.running_jobs.get(atom.job_id)
-                if not tup:
-                    continue
-
-                job, g = tup
-                cur_f = getattr(job, "f_used", dc.current_freq)
-                # Bỏ qua atoms "không đi xuống"
-                if atom.f_to >= cur_f - 1e-12:
-                    continue
-
-                # Thực hiện reschedule về f_to
-                self._reschedule_job(dc, job, g, atom.f_to)
-                applied_any = True
-
-                # 3.4 Tái-ước-lượng totalP CHÍNH XÁC sau khi đổi f
-                new_totalP = 0.0
-                for _dc in self.dcs.values():
-                    new_totalP += self._estimate_dc_power(_dc, getattr(_dc, "current_freq", 1.0))
-                totalP = new_totalP
-                deficit = max(0.0, totalP - self.power_cap)
-
-                if deficit <= 1e-6:
-                    break
-
-            # Nếu vòng này không áp dụng được atom nào → thoát
-            if not applied_any:
-                break
+        run_power_cap_control(self)
 
     def _job_rate_units_per_s(self, dc, job, gpus, f):
         # 1 unit công việc mất T_unit(n,f) giây ⇒ tốc độ (units/s) = 1 / T_unit
@@ -495,6 +373,138 @@ class MultiIngressPaperSimulator:
         transfer_s = Lnet_s + xfer_s
         return Lnet_s, path, bottleneck, cost_sum, transfer_s
 
+    def _guard_freq_by_deadline(self, job: Job, n: int, levels, tC, f_pref: float) -> float:
+        ddl = getattr(job, "deadline", None)
+        f = float(f_pref)
+        if ddl is None:
+            return f
+
+        if job.size * step_time_s(n, f, tC) <= ddl:
+            return f
+
+        levels_sorted = sorted(levels)
+        for f_cand in levels_sorted:
+            if job.size * step_time_s(n, f_cand, tC) <= ddl:
+                return float(f_cand)
+        return float(levels_sorted[-1])
+
+    def _plan_start_on_fixed_dc(
+        self,
+        dc: DataCenter,
+        job: Job,
+    ) -> Optional[StartPlan]:
+        if dc.free_gpus <= 0:
+            return None
+
+        if self.algo == "joint_nf":
+            pC, tC = self.coeffs_map[(dc.name, job.jtype)]
+            n_star, f_star, *_ = best_nf_grid(
+                n_max=self.policy.max_gpus_per_job,
+                freq_levels=dc.freq_levels,
+                p_coeffs=pC,
+                t_coeffs=tC,
+                objective="energy",
+                carbon_intensity=0.0,
+                deadline_s=getattr(job, "deadline", None),
+            )
+            return StartPlan(dc=dc, n_gpus=n_star, freq=float(f_star))
+
+        if self.algo == "bandit":
+            n_try = min(dc.free_gpus, self.policy.max_gpus_per_job)
+            f_try = self.bandit.select(dc.name, job.jtype, dc.freq_levels)
+            return StartPlan(dc=dc, n_gpus=n_try, freq=float(f_try))
+
+        if self.algo == "carbon_cost":
+            pC, tC = self.coeffs_map[(dc.name, job.jtype)]
+            price = self._price_kwh_at(dc.name)
+            CI = self.carbon.get(dc.name, 0.0)
+
+            if price > 0.0:
+                n_star, f_star, *_ = best_nf_grid(
+                    n_max=self.policy.max_gpus_per_job,
+                    freq_levels=dc.freq_levels,
+                    p_coeffs=pC,
+                    t_coeffs=tC,
+                    objective="cost",
+                    price_kwh=price,
+                    deadline_s=getattr(job, "deadline", None),
+                )
+            else:
+                n_star, f_star, *_ = best_nf_grid(
+                    n_max=self.policy.max_gpus_per_job,
+                    freq_levels=dc.freq_levels,
+                    p_coeffs=pC,
+                    t_coeffs=tC,
+                    objective="carbon",
+                    carbon_intensity=CI,
+                    deadline_s=getattr(job, "deadline", None),
+                )
+
+            return StartPlan(dc=dc, n_gpus=n_star, freq=float(f_star))
+
+        if self.algo == "chsac_af" and hasattr(job, "_upgr_action"):
+            a = job._upgr_action
+            n = max(1, min(a["n"], dc.free_gpus, self.policy.max_gpus_per_job))
+
+            pC, tC = self.coeffs_map[(dc.name, job.jtype)]
+            levels = sorted(dc.freq_levels) if getattr(dc, "freq_levels", None) else [
+                getattr(dc, "current_freq", 1.0)
+            ]
+            f_opt = best_energy_freq(n, levels, pC, tC)
+            f_opt = self._guard_freq_by_deadline(job, n, levels, tC, f_opt)
+            return StartPlan(dc=dc, n_gpus=n, freq=float(f_opt))
+
+        if self.algo == "debug":
+            pC, tC = self.coeffs_map[(dc.name, job.jtype)]
+            n = self.num_fixed_gpus
+            f = self.fixed_freq if self.fixed_freq else best_energy_freq(n, dc.freq_levels, pC, tC)
+            return StartPlan(dc=dc, n_gpus=n, freq=float(f))
+
+        gpus = select_gpus_and_set_freq(dc, job, self.policy)
+        if gpus > 0:
+            return StartPlan(dc=dc, n_gpus=gpus, freq=None)
+        return None
+
+    def _plan_start_from_queue(self, dc: DataCenter, job: Job) -> Optional[StartPlan]:
+        if self.algo == "chsac_af" and (self.rl_upgr is not None):
+            obs = self._upgr_obs()
+            m_dc, m_g = self._upgr_masks()
+
+            obs_t = torch.from_numpy(obs).float().unsqueeze(0)
+            m_dc_t = torch.from_numpy(m_dc).unsqueeze(0).bool()
+            m_g_t = torch.from_numpy(m_g).unsqueeze(0).bool()
+
+            a = self.rl_upgr.select_action(obs_t, m_dc_t, m_g_t, deterministic=False)
+            dc_tgt = self.dcs[self._dc_idx_to_name(a["dc"])]
+
+            if dc_tgt.free_gpus <= 0:
+                return None
+
+            n_sel = max(1, min(self._gidx_to_n(int(a["g"])), dc_tgt.free_gpus, self.policy.max_gpus_per_job))
+            pC, tC = self.coeffs_map[(dc_tgt.name, job.jtype)]
+            levels = sorted(dc_tgt.freq_levels)
+            f_opt = best_energy_freq(n_sel, levels, pC, tC)
+            f_sel = self._guard_freq_by_deadline(job, n_sel, levels, tC, f_opt)
+
+            return StartPlan(
+                dc=dc_tgt,
+                n_gpus=n_sel,
+                freq=float(f_sel),
+                rl_trace={"state0": obs, "action": {"dc_idx": int(a["dc"]), "g_idx": int(a["g"]), "n": n_sel}},
+            )
+
+        return self._plan_start_on_fixed_dc(dc, job)
+
+    def _apply_start_plan(self, plan: StartPlan, job: Job) -> bool:
+        ok = self._start_job(plan.dc, job, plan.n_gpus, freq=plan.freq)
+        if not ok:
+            return False
+
+        if plan.rl_trace is not None:
+            job._upgr_state0 = plan.rl_trace["state0"]
+            job._upgr_action = plan.rl_trace["action"]
+        return True
+
     def _rl_reallocate_training_jobs(self, dc: DataCenter, preempted_jobs: List[PreemptedJob]):
         if self.algo not in ("chsac_af") or not self.rl_upgr:
             return
@@ -519,19 +529,10 @@ class MultiIngressPaperSimulator:
                 pC, tC = self.coeffs_map[(dc.name, job.jtype)]
                 levels = sorted(dc.freq_levels) if dc.freq_levels else [getattr(dc, "current_freq", 1.0)]
                 f_rl = best_energy_freq(n_rl, levels, pC, tC)
+                f_rl = self._guard_freq_by_deadline(job, n_rl, levels, tC, f_rl)
 
-                ddl = getattr(job, "deadline", None)  # training thường None; nếu có thì guard
-                if ddl is not None:
-                    if job.size * step_time_s(n_rl, f_rl, tC) > ddl:
-                        for f_cand in levels:
-                            if job.size * step_time_s(n_rl, f_cand, tC) <= ddl:
-                                f_rl = f_cand
-                                break
-                        else:
-                            f_rl = levels[-1]
-
-            # Thực sự resume 1 lần tại đây cho mọi nhánh
-            self._resume_preempted_job(dc, preempted_job, n_rl, f_rl)
+                # Thực sự resume 1 lần tại đây cho mọi nhánh
+                self._resume_preempted_job(dc, preempted_job, n_rl, f_rl)
 
     # --- arrivals at ingress ---
     def _handle_ingress_arrival(self, jtype: str, ing_name: str):
@@ -598,105 +599,42 @@ class MultiIngressPaperSimulator:
         job.dc_name = dc.name
         job.arrival_time = self.now  # coi như 'đến' DC lúc này
         job.net_latency_s = payload['net_lat_s']
-        # enqueue or start
-        if dc.free_gpus > 0:
-            if self.algo == "joint_nf":
-                pC, tC = self.coeffs_map[(dc.name, job.jtype)]
-                # deadline cho inference, còn training thì None
-                ddl = getattr(job, "deadline", None)
-                # mục tiêu "energy" ở đây (hoặc "carbon" nếu muốn carbon-aware)
-                n_star, f_star, *_ = best_nf_grid(
-                    n_max=self.policy.max_gpus_per_job,
-                    freq_levels=dc.freq_levels,
-                    p_coeffs=pC, t_coeffs=tC,
-                    objective="energy",
-                    carbon_intensity=0.0,
-                    deadline_s=ddl
-                )
-                return self._start_job_with_nf(dc, job, n_star, f_star)
-            elif self.algo == "bandit":
-                # chọn n theo policy (vd ưu tiên 1 cho inference, 2-4 cho training)
-                n_try = min(dc.free_gpus, self.policy.max_gpus_per_job)
-                f_try = self.bandit.select(dc.name, job.jtype, dc.freq_levels)
-                return self._start_job_with_nf(dc, job, n_try, f_try)
-            elif self.algo == "carbon_cost":
-                pC, tC = self.coeffs_map[(dc.name, job.jtype)]
-                price = self._price_kwh(dc.name)  # <— dùng helper
-                CI = self.carbon.get(dc.name, 0.0)
-                # Nếu có bảng giá -> tối ưu chi phí; nếu không -> tối ưu carbon
-                if price > 0.0:
-                    n_star, f_star, *_ = best_nf_grid(
-                        n_max=self.policy.max_gpus_per_job,
-                        freq_levels=dc.freq_levels,
-                        p_coeffs=pC, t_coeffs=tC,
-                        objective="cost",
-                        price_kwh=price,
-                        deadline_s=getattr(job, "deadline", None)
-                    )
-                else:
-                    n_star, f_star, *_ = best_nf_grid(
-                        n_max=self.policy.max_gpus_per_job,
-                        freq_levels=dc.freq_levels,
-                        p_coeffs=pC, t_coeffs=tC,
-                        objective="carbon",
-                        carbon_intensity=CI,
-                        deadline_s=getattr(job, "deadline", None)
-                    )
-                return self._start_job_with_nf(dc, job, n_star, f_star)
-            elif self.algo == "chsac_af" and hasattr(job, "_upgr_action"):
-                a = job._upgr_action
-                # đảm bảo n không vượt free và policy
-                n = max(1, min(a["n"], dc.free_gpus, self.policy.max_gpus_per_job))
 
-                pC, tC = self.coeffs_map[(dc.name, job.jtype)]
-                levels = sorted(dc.freq_levels) if getattr(dc, "freq_levels", None) else [
-                    getattr(dc, "current_freq", 1.0)]
-                f_opt = best_energy_freq(n, levels, pC, tC)
-
-                ddl = getattr(job, "deadline", None)
-                if ddl is not None:
-                    # nếu f_opt khiến thời gian vượt deadline → nâng f lên mức nhỏ nhất thỏa deadline
-                    if job.size * step_time_s(n, f_opt, tC) > ddl:
-                        for f_cand in levels:
-                            if job.size * step_time_s(n, f_cand, tC) <= ddl:
-                                f_opt = f_cand
-                                break
-                        else:
-                            f_opt = levels[-1]  # vẫn không đủ → dùng f lớn nhất
-
-                return self._start_job_with_nf(dc, job, n, float(f_opt))
-            elif self.algo == "debug":
-                pC, tC = self.coeffs_map[(dc.name, job.jtype)]
-                n = self.num_fixed_gpus
-                f = self.fixed_freq if self.fixed_freq else best_energy_freq(n, dc.freq_levels, pC, tC)
-                return self._start_job_with_nf(dc, job, n, f)
-            else:
-                gpus = select_gpus_and_set_freq(dc, job, self.policy)
-                if gpus > 0:
-                    return self._start_job(dc, job, gpus)
+        plan = self._plan_start_on_fixed_dc(dc, job)
+        if plan is not None:
+            self._apply_start_plan(plan, job)
+            return
 
         (dc.q_inf if job.jtype == 'inference' else dc.q_train).append(job)
 
-    def _start_job(self, dc: DataCenter, job: Job, gpus: int):
-        if gpus <= 0:
+    def _start_job(self, dc: DataCenter, job: Job, gpus: int, freq: Optional[float] = None) -> bool:
+        """Job allocation with gpus (n) and frequency (f) (default dc.current_freq)."""
+        if dc.free_gpus <= 0 or gpus <= 0:
             (dc.q_inf if job.jtype == 'inference' else dc.q_train).append(job)
-            return
-        dc.busy_gpus += gpus
-        dc.running_jobs[job.jid] = (job, gpus)
-        job.gpus_assigned = gpus
+            return False
+
+        n = min(gpus, dc.free_gpus)
+        f = dc.current_freq if freq is None else float(freq)
+
+        dc.busy_gpus += n
+        dc.running_jobs[job.jid] = (job, n)
+        job.gpus_assigned = n
         job.start_time = self.now
 
-        job.f_used = dc.current_freq
+        job.f_used = f
         job.units_total = job.size
         job.units_done = 0.0
         job.last_update = self.now
         job.ev_gen += 1
 
-        p_coeffs, t_coeffs = self.coeffs_map[(dc.name, job.jtype)]
-        T_unit = step_time_s(gpus, dc.current_freq, t_coeffs)
-
-        # service_time = job.size * T_unit
-        self._schedule(self.now + job.size * T_unit, 'job_finish', {'dc': dc.name, 'jid': job.jid, 'gen': job.ev_gen})
+        _, t_coeffs = self.coeffs_map[(dc.name, job.jtype)]
+        t_unit = step_time_s(n, f, t_coeffs)
+        self._schedule(
+            self.now + job.size * t_unit,
+            'job_finish',
+            {'dc': dc.name, 'jid': job.jid, 'gen': job.ev_gen},
+        )
+        return True
 
     def _handle_job_finish(self, dc_name: str, jid: int):
         dc = self.dcs[dc_name]
@@ -757,20 +695,11 @@ class MultiIngressPaperSimulator:
         # === Update RL Upgr ===
         if (self.algo == "chsac_af" and self.rl_upgr is not None and
                 hasattr(job, "_upgr_action") and hasattr(job, "_upgr_state0")):
-            # TODO Mode 1
-            # r = - (float(rl_metrics["energy_kwh"]) / (float(rl_metrics["units_processed"] + 1e-9)))
-
-            # TODO Mode 2
+            # CHSAC-AF reward
             E_unit_kWh = float(rl_metrics["energy_kwh"]) / (float(rl_metrics["units_processed"]) + 1e-9)
-
-            # --- ưu tiên ít GPU và không vượt f_opt năng lượng ---
             n = max(1, int(job._upgr_action["n"]))
-
-            # 1/n: càng ít GPU càng thưởng nhẹ (scale nhỏ để không phá SLA)
-            # TODO: Chỉnh alpha
             alpha_n = 0.05
             gpu_pref = alpha_n * (1.0 / n)
-
             r = - E_unit_kWh + gpu_pref
 
             sla_ms_target = self.rl_upgr.cmdp.constraints["latency_p99"].target
@@ -810,7 +739,7 @@ class MultiIngressPaperSimulator:
             del job._upgr_state0
             del job._upgr_action
 
-        # Ghi log job (giữ nguyên)
+        # Ghi log job
         with open(self.job_log_path, 'a', newline='') as f:
             csv.writer(f).writerow([
                 job.jid, getattr(job, "ingress", ""),
@@ -846,85 +775,17 @@ class MultiIngressPaperSimulator:
             if nxt is None:
                 break
 
-            if self.algo == "chsac_af" and (self.rl_upgr is not None):
-                obs = self._upgr_obs()
-                m_dc, m_g = self._upgr_masks()
-                obs_t = torch.from_numpy(obs).float().unsqueeze(0)
-                m_dc_t = torch.from_numpy(m_dc).unsqueeze(0).bool()
-                m_g_t = torch.from_numpy(m_g).unsqueeze(0).bool()
-                a = self.rl_upgr.select_action(obs_t, m_dc_t, m_g_t, deterministic=False)
+            plan = self._plan_start_from_queue(dc, nxt)
+            if plan is None:
+                (dc.q_inf if nxt.jtype == 'inference' else dc.q_train).insert(0, nxt)
+                break
 
-                dc_tgt = self.dcs[self._dc_idx_to_name(a["dc"])]
-                if dc_tgt.free_gpus <= 0:
-                    # không DC nào rảnh phù hợp → đẩy lại hàng đợi và thoát vòng
-                    (dc.q_inf if nxt.jtype == 'inference' else dc.q_train).insert(0, nxt)
-                    break
+            if not self._apply_start_plan(plan, nxt):
+                (dc.q_inf if nxt.jtype == 'inference' else dc.q_train).insert(0, nxt)
+                break
 
-                n_sel = max(1, min(self._gidx_to_n(int(a["g"])), dc_tgt.free_gpus, self.policy.max_gpus_per_job))
-
-                # === Chọn f tối ưu về năng lượng như joint_nf, với guard SLA nếu có ===
-                pC, tC = self.coeffs_map[(dc_tgt.name, nxt.jtype)]
-                levels = sorted(dc_tgt.freq_levels)
-
-                # f tối ưu năng lượng tại n_sel
-                f_opt = best_energy_freq(n_sel, levels, pC, tC)
-
-                # Guard theo deadline (nếu job có)
-                ddl = getattr(nxt, "deadline", None)  # deadline (s) nếu có
-                if ddl is not None:
-                    # nếu f_opt khiến thời gian vượt deadline → tăng f lên mức nhỏ nhất thoả
-                    if nxt.size * step_time_s(n_sel, f_opt, tC) > ddl:
-                        for f_cand in levels:
-                            if nxt.size * step_time_s(n_sel, f_cand, tC) <= ddl:
-                                f_opt = f_cand
-                                break
-                        else:
-                            f_opt = levels[-1]  # vẫn không đủ thì dùng f lớn nhất
-
-                f_sel = float(f_opt)
-
-                # start và ghi dấu vết để update khi xong job
-                self._start_job_with_nf(dc_tgt, nxt, n_sel, f_sel)
-                nxt._upgr_state0 = obs
-                nxt._upgr_action = {"dc_idx": int(a["dc"]), "g_idx": int(a["g"]), "n": n_sel}
+            if plan.dc is not dc:
                 break  # DC có thể đã thay đổi → thoát để tránh giả định free_gpus cũ
-
-            if self.algo == "joint_nf":
-                pC, tC = self.coeffs_map[(dc.name, nxt.jtype)]
-                n_star, f_star, *_ = best_nf_grid(
-                    n_max=self.policy.max_gpus_per_job,
-                    freq_levels=dc.freq_levels,
-                    p_coeffs=pC, t_coeffs=tC,
-                    objective="energy",
-                    carbon_intensity=0.0,
-                    deadline_s=getattr(nxt, "deadline", None)
-                )
-                self._start_job_with_nf(dc, nxt, n_star, f_star)
-
-            elif self.algo == "bandit":
-                n_try = min(dc.free_gpus, self.policy.max_gpus_per_job)
-                f_try = self.bandit.select(dc.name, nxt.jtype, dc.freq_levels)
-                self._start_job_with_nf(dc, nxt, n_try, f_try)
-
-            elif self.algo == "carbon_cost":
-                pC, tC = self.coeffs_map[(dc.name, nxt.jtype)]
-                CI = self.carbon.get(dc.name, 0.0)
-                n_star, f_star, *_ = best_nf_grid(
-                    n_max=self.policy.max_gpus_per_job,
-                    freq_levels=dc.freq_levels,
-                    p_coeffs=pC, t_coeffs=tC,
-                    objective="carbon",
-                    carbon_intensity=CI,
-                    deadline_s=getattr(nxt, "deadline", None)
-                )
-                self._start_job_with_nf(dc, nxt, n_star, f_star)
-
-            else:
-                gpus = select_gpus_and_set_freq(dc, nxt, self.policy)
-                if gpus <= 0:
-                    (dc.q_inf if nxt.jtype == 'inference' else dc.q_train).insert(0, nxt)
-                    break
-                self._start_job(dc, nxt, gpus)
 
     def _handle_log(self, interval: float):
         with open(self.cluster_log_path, 'a', newline='') as f:
@@ -957,53 +818,6 @@ class MultiIngressPaperSimulator:
 
         dc.accumulated_job_unit += (tpt_job * accumulate_time)
 
-    def _start_job_with_nf(self, dc, job, n, f):
-        # cấp phát
-        n = max(1, min(n, dc.free_gpus))
-        if n <= 0:
-            (dc.q_inf if job.jtype == 'inference' else dc.q_train).append(job)
-            return
-        dc.busy_gpus += n
-        dc.running_jobs[job.jid] = (job, n)
-        job.gpus_assigned = n
-        job.start_time = self.now
-        # per-job DVFS (nếu đã thêm f_used/ev_gen, dùng như sau; nếu chưa, coi như DC-level)
-        if hasattr(job, "f_used"):
-            job.f_used = f
-            job.units_total = job.size
-            job.units_done = 0.0
-            job.last_update = self.now
-            job.ev_gen += 1
-        p_coeffs, t_coeffs = self.coeffs_map[(dc.name, job.jtype)]
-        T_unit = step_time_s(n, f, t_coeffs)
-        self._schedule(self.now + job.size * T_unit, 'job_finish',
-                       {'dc': dc.name, 'jid': job.jid, 'gen': getattr(job, "ev_gen", 0)})
-
-    def _current_hour(self) -> int:
-        """Giờ hiện tại (0..23) trong ngày mô phỏng, tính theo self.now (giây)."""
-        return int((self.now % 86400) // 3600)
-
-    def _price_kwh(self, dc_name: str) -> float:
-        """
-        Giá điện (USD/kWh) tại giờ hiện tại cho DC.
-        Hỗ trợ 2 format:
-          - Global hourly map: {hour:int -> price:float}
-          - Per-DC hourly map: {dc_name:str -> {hour:int -> price:float}}
-        """
-        ep = getattr(self, "energy_price", {}) or {}
-        h = self._current_hour()
-
-        # Global hourly map? (keys là int)
-        if ep and all(isinstance(k, int) for k in ep.keys()):
-            return float(ep.get(h, 0.0))
-
-        # Per-DC hourly map? (keys là tên DC)
-        dc_map = ep.get(dc_name)
-        if isinstance(dc_map, dict):
-            return float(dc_map.get(h, 0.0))
-
-        return 0.0
-
     def _score_dc_for_job(self, dc, job) -> tuple:
         """
         Trả về (score, n_star, f_star) cho job nếu chạy ở dc theo eco-objective.
@@ -1018,7 +832,7 @@ class MultiIngressPaperSimulator:
 
         # Carbon / price lấy từ state đã có
         CI = self.carbon.get(dc.name, 0.0)
-        price = self._price_kwh(dc.name) if hasattr(self, "_price_kwh") else 0.0
+        price = self._price_kwh_at(dc.name) if hasattr(self, "_price_kwh") else 0.0
 
         # chọn (n,f) tốt nhất cho mục tiêu
         if obj == "energy":
@@ -1037,6 +851,31 @@ class MultiIngressPaperSimulator:
             score = (E_unit * job.size) / 3.6e6 * price  # USD
 
         return score, n, f
+
+    def _current_hour(self) -> int:
+        """Giờ hiện tại (0..23) trong ngày mô phỏng, tính theo self.now (giây)."""
+        return int((self.now % 86400) // 3600)
+
+    def _price_kwh_at(self, dc_name: str) -> float:
+        """
+        Giá điện (USD/kWh) tại giờ hiện tại cho DC.
+        Hỗ trợ 2 format:
+          - Global hourly map: {hour:int -> price:float}
+          - Per-DC hourly map: {dc_name:str -> {hour:int -> price:float}}
+        """
+        energy_price = getattr(self, "energy_price", {}) or {}
+        h = self._current_hour()
+
+        # Global hourly map? (keys là int)
+        if energy_price and all(isinstance(k, int) for k in energy_price.keys()):
+            return float(energy_price.get(h, 0.0))
+
+        # Per-DC hourly map? (keys là tên DC)
+        dc_map = energy_price.get(dc_name)
+        if isinstance(dc_map, dict):
+            return float(dc_map.get(h, 0.0))
+
+        return 0.0
 
     def _upgr_obs(self) -> np.ndarray:
         """Vector hoá trạng thái cho RL Upgr: [now] + cho từng DC: [total, busy, free, current_f, qlen_inf, qlen_trn]."""

@@ -1,9 +1,10 @@
 from typing import Dict
-from simcore.models import GPUType, DataCenter
-from simcore.arrivals import ArrivalConfig
+from simcore.models.datacenter.datacenter import DataCenter
+from simcore.models.gpu.gpu import GPUType
+from simcore.workload.arrivals import ArrivalConfig
 from simcore.policy import PolicyConfig
-from simcore.coeffs import TrainPowerCoeffs, TrainLatencyCoeffs
-from simcore.network import Graph, Ingress
+from simcore.models.gpu.coeffs import TrainPowerCoeffs, TrainLatencyCoeffs
+from simcore.models.network import Graph, Ingress
 from simcore.router import RouterPolicy
 
 

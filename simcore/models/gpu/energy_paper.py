@@ -1,4 +1,4 @@
-from .coeffs import TrainPowerCoeffs
+from simcore.models.gpu.coeffs import TrainPowerCoeffs
 
 
 def gpu_power_w(f_ghz: float, coeffs: TrainPowerCoeffs) -> float:

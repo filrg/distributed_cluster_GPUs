@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from .models import DataCenter, Job
+from simcore.models.datacenter.datacenter import DataCenter
+from simcore.models.job import Job
 
 
 @dataclass

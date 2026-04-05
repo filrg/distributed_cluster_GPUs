@@ -1,5 +1,5 @@
 from typing import Iterable, List
-from .models import GPUType
+from simcore.models.gpu.gpu import GPUType
 
 
 def validate_gpus(gpus: Iterable[GPUType], strict: bool = False) -> List[str]:
