@@ -1,4 +1,4 @@
-import csv, heapq, itertools, random, os, numpy as np, torch
+import csv, heapq, itertools, random, os, numpy as np
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Union
 from simcore.models.datacenter.datacenter import DataCenter
@@ -12,8 +12,7 @@ from .router import RouterPolicy
 from simcore.models.gpu.energy_paper import task_power_w
 from simcore.algo.UCB1 import BanditDVFS
 from simcore.algo.power_cap import run_power_cap_control
-from simcore.rl.rl_energy_agent_adv_upgrade import CHSAC_AF
-from simcore.rl.replay import ReplayBuffer, Transition
+from simcore.rl.chsac_af_runtime import ChsacAFRuntime
 
 try:
     from tqdm.auto import tqdm
@@ -25,7 +24,7 @@ Event = Tuple[float, int, str, dict]
 
 @dataclass
 class StartPlan:
-    """Start plan for a job, rl_trace used for RL training after job finished"""
+    """Start plan for a job, rl_trace used for RL training after job finished."""
     dc: DataCenter
     n_gpus: int
     freq: Optional[float] = None
@@ -99,44 +98,22 @@ class MultiIngressPaperSimulator:
         self.control_interval = control_interval
         self.bandit = BanditDVFS(init_explore=1, objective="energy") if algo == "bandit" else None
 
-        # === RL Upgraded mode ===
+        # CHSAC-AF runtime
+        self._chsac_runtime = None
         self.rl_upgr = None
         if self.algo == "chsac_af":
-            # danh sách DC cố định để map chỉ số <-> tên
             self._dc_names: List[str] = list(self.dcs.keys())
-
-            # bắc cầu số lựa chọn GPU: 1..N (dựa theo max_gpus_per_job hoặc max free)
             self._n_g_choices = int(self.policy.max_gpus_per_job)
-
-            # biên DVFS toàn cục (lấy min/max trên tất cả DC có freq_levels)
             f_all = [f for dc in self.dcs.values() for f in getattr(dc, "freq_levels", [])]
             self._f_min = min(f_all) if f_all else 1.0
-
-            # kích thước quan sát (thêm helper bên dưới)
-            self._obs_dim = self._upgr_obs().shape[0]
-
-            # Constraints mặc định: dùng SLA inference nếu có, + power_cap (nếu >0)
-            constraints = {}
-            constraints["latency_p99"] = sla_p99_ms
-            if self.power_cap and self.power_cap > 0:
-                constraints["power"] = float(self.power_cap)
-            if self.energy_budget_j and self.energy_budget_j > 0:
-                constraints["energy_total"] = float(self.energy_budget_j)
-            constraints["gpu_over"] = 0.0
-
-            self.rl_upgr = CHSAC_AF(
-                obs_dim=self._obs_dim,
-                n_dc=len(self._dc_names),
-                n_g_choices=self._n_g_choices,
-                constraints=constraints,
-                device="cuda" if torch.cuda.is_available() else "cpu",
+            self._chsac_runtime = ChsacAFRuntime(
+                simulator=self,
+                sla_p99_ms=sla_p99_ms,
+                upgr_batch=upgr_batch,
+                upgr_warmup=upgr_warmup,
+                upgr_buffer=upgr_buffer,
             )
-
-            # Replay buffer và hyper đơn giản
-            self._upgr_batch = upgr_batch
-            self._upgr_warmup = upgr_warmup
-            self._replay = ReplayBuffer(capacity=upgr_buffer, state_dim=self._obs_dim,
-                                        device="cuda" if torch.cuda.is_available() else "cpu")
+            self.rl_upgr = self._chsac_runtime.rl_upgr
 
         # debug
         self.num_fixed_gpus = num_fixed_gpus
@@ -442,17 +419,12 @@ class MultiIngressPaperSimulator:
 
             return StartPlan(dc=dc, n_gpus=n_star, freq=float(f_star))
 
-        if self.algo == "chsac_af" and hasattr(job, "_upgr_action"):
-            a = job._upgr_action
-            n = max(1, min(a["n"], dc.free_gpus, self.policy.max_gpus_per_job))
-
-            pC, tC = self.coeffs_map[(dc.name, job.jtype)]
-            levels = sorted(dc.freq_levels) if getattr(dc, "freq_levels", None) else [
-                getattr(dc, "current_freq", 1.0)
-            ]
-            f_opt = best_energy_freq(n, levels, pC, tC)
-            f_opt = self._guard_freq_by_deadline(job, n, levels, tC, f_opt)
-            return StartPlan(dc=dc, n_gpus=n, freq=float(f_opt))
+        if self._chsac_runtime is not None and hasattr(job, "_upgr_action"):
+            decision = self._chsac_runtime.fixed_dc_allocation(dc, job)
+            if decision is not None:
+                n, f = decision
+                return StartPlan(dc=dc, n_gpus=n, freq=float(f))
+            return None
 
         if self.algo == "debug":
             pC, tC = self.coeffs_map[(dc.name, job.jtype)]
@@ -466,32 +438,13 @@ class MultiIngressPaperSimulator:
         return None
 
     def _plan_start_from_queue(self, dc: DataCenter, job: Job) -> Optional[StartPlan]:
-        if self.algo == "chsac_af" and (self.rl_upgr is not None):
-            obs = self._upgr_obs()
-            m_dc, m_g = self._upgr_masks()
-
-            obs_t = torch.from_numpy(obs).float().unsqueeze(0)
-            m_dc_t = torch.from_numpy(m_dc).unsqueeze(0).bool()
-            m_g_t = torch.from_numpy(m_g).unsqueeze(0).bool()
-
-            a = self.rl_upgr.select_action(obs_t, m_dc_t, m_g_t, deterministic=False)
-            dc_tgt = self.dcs[self._dc_idx_to_name(a["dc"])]
-
-            if dc_tgt.free_gpus <= 0:
+        if self._chsac_runtime is not None:
+            decision = self._chsac_runtime.queue_allocation(job)
+            if decision is None:
                 return None
 
-            n_sel = max(1, min(self._gidx_to_n(int(a["g"])), dc_tgt.free_gpus, self.policy.max_gpus_per_job))
-            pC, tC = self.coeffs_map[(dc_tgt.name, job.jtype)]
-            levels = sorted(dc_tgt.freq_levels)
-            f_opt = best_energy_freq(n_sel, levels, pC, tC)
-            f_sel = self._guard_freq_by_deadline(job, n_sel, levels, tC, f_opt)
-
-            return StartPlan(
-                dc=dc_tgt,
-                n_gpus=n_sel,
-                freq=float(f_sel),
-                rl_trace={"state0": obs, "action": {"dc_idx": int(a["dc"]), "g_idx": int(a["g"]), "n": n_sel}},
-            )
+            dc_tgt, n_sel, f_sel = decision
+            return StartPlan(dc=dc_tgt, n_gpus=n_sel, freq=float(f_sel))
 
         return self._plan_start_on_fixed_dc(dc, job)
 
@@ -506,33 +459,9 @@ class MultiIngressPaperSimulator:
         return True
 
     def _rl_reallocate_training_jobs(self, dc: DataCenter, preempted_jobs: List[PreemptedJob]):
-        if self.algo not in ("chsac_af") or not self.rl_upgr:
+        if self._chsac_runtime is None:
             return
-
-        for preempted_job in preempted_jobs:
-            job = preempted_job.job
-
-            if self.algo == "chsac_af" and (self.rl_upgr is not None):
-                # RL Upgr chỉ quyết định số GPU; f lấy theo energy-opt như joint_nf
-                obs = self._upgr_obs()
-                m_dc, m_g = self._upgr_masks()
-                obs_t = torch.from_numpy(obs).float().unsqueeze(0)
-                m_dc_t = torch.from_numpy(m_dc).unsqueeze(0).bool()
-                m_g_t = torch.from_numpy(m_g).unsqueeze(0).bool()
-                a = self.rl_upgr.select_action(obs_t, m_dc_t, m_g_t, deterministic=False)
-
-                # n từ actor (kẹp theo free/limit)
-                n_rl = self._gidx_to_n(int(a["g"]))
-                n_rl = max(1, min(n_rl, dc.free_gpus, self.policy.max_gpus_per_job))
-
-                # f tối ưu năng lượng tại n_rl (giống joint_nf) + guard deadline nếu có
-                pC, tC = self.coeffs_map[(dc.name, job.jtype)]
-                levels = sorted(dc.freq_levels) if dc.freq_levels else [getattr(dc, "current_freq", 1.0)]
-                f_rl = best_energy_freq(n_rl, levels, pC, tC)
-                f_rl = self._guard_freq_by_deadline(job, n_rl, levels, tC, f_rl)
-
-                # Thực sự resume 1 lần tại đây cho mọi nhánh
-                self._resume_preempted_job(dc, preempted_job, n_rl, f_rl)
+        self._chsac_runtime.reallocate_training_jobs(dc, preempted_jobs)
 
     # --- arrivals at ingress ---
     def _handle_ingress_arrival(self, jtype: str, ing_name: str):
@@ -553,24 +482,8 @@ class MultiIngressPaperSimulator:
             _, dc_name, Lnet, path, bottleneck, cost_sum, transfer_s, n_star, f_star = best
             job._eco_hint = (n_star, f_star)
 
-        elif self.algo == "chsac_af" and (self.rl_upgr is not None):
-            # Dùng RL Upgr để chọn DC + nGPU + freq
-            obs = self._upgr_obs()
-            m_dc, m_g = self._upgr_masks()
-
-            obs_t = torch.from_numpy(obs).float().unsqueeze(0)
-            m_dc_t = torch.from_numpy(m_dc).unsqueeze(0).bool()
-            m_g_t = torch.from_numpy(m_g).unsqueeze(0).bool()
-
-            a = self.rl_upgr.select_action(obs_t, m_dc_t, m_g_t, deterministic=False)
-            dc_name = self._dc_idx_to_name(a["dc"])
-            n_sel = self._gidx_to_n(a["g"])
-            # f_sel = float(a["f"])
-
-            # lưu dấu vết để train khi job xong
-            job._upgr_state0 = obs
-            job._upgr_action = {"dc_idx": int(a["dc"]), "g_idx": int(a["g"]), "n": n_sel}
-
+        elif self._chsac_runtime is not None:
+            dc_name = self._chsac_runtime.route_arrival(job)
             Lnet, path, bottleneck, cost_sum, transfer_s = self._net_tuple(ing_name, dc_name, job)
         else:
             names = list(self.dcs.keys())
@@ -693,51 +606,8 @@ class MultiIngressPaperSimulator:
         self.logger.debug({k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in rl_metrics.items()})
 
         # === Update RL Upgr ===
-        if (self.algo == "chsac_af" and self.rl_upgr is not None and
-                hasattr(job, "_upgr_action") and hasattr(job, "_upgr_state0")):
-            # CHSAC-AF reward
-            E_unit_kWh = float(rl_metrics["energy_kwh"]) / (float(rl_metrics["units_processed"]) + 1e-9)
-            n = max(1, int(job._upgr_action["n"]))
-            alpha_n = 0.05
-            gpu_pref = alpha_n * (1.0 / n)
-            r = - E_unit_kWh + gpu_pref
-
-            sla_ms_target = self.rl_upgr.cmdp.constraints["latency_p99"].target
-            n_min = self._min_n_for_sla(dc, job, f_used, sla_ms_target)
-            gpu_over = max(0, g - n_min)
-
-            # Costs cho CMDP
-            costs = {
-                "latency_p99": float(rl_metrics["p99_latency_ms"]),
-                "power": float(rl_metrics["power_W"]),
-                "gpu_over": float(gpu_over),
-            }
-
-            s0 = job._upgr_state0
-            s1 = self._upgr_obs()  # trạng thái sau khi job hoàn tất (next state)
-            a_dc_idx = int(job._upgr_action["dc_idx"])
-            a_g_idx = int(job._upgr_action["g_idx"])
-
-            # mask tại thời điểm chọn action (để agent có thể dùng trong training nếu cần)
-            m_dc, m_g = self._upgr_masks()
-
-            self._replay.add(Transition(
-                s=s0, s_next=s1,
-                a_dc=a_dc_idx, a_g=a_g_idx,
-                r=r, costs=costs, done=True,
-                mask_dc=m_dc, mask_g=m_g
-            ))
-
-            # Train khi đủ dữ liệu
-            if self._replay.size >= self._upgr_warmup:
-                batch = self._replay.sample(self._upgr_batch)
-                stats = self.rl_upgr.train_step(batch)
-                if stats:
-                    self.logger.info({k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in stats.items()})
-
-            # dọn dấu vết
-            del job._upgr_state0
-            del job._upgr_action
+        if self._chsac_runtime is not None:
+            self._chsac_runtime.on_job_finish(dc, job, g, f_used, rl_metrics)
 
         # Ghi log job
         with open(self.job_log_path, 'a', newline='') as f:
@@ -876,49 +746,6 @@ class MultiIngressPaperSimulator:
             return float(dc_map.get(h, 0.0))
 
         return 0.0
-
-    def _upgr_obs(self) -> np.ndarray:
-        """Vector hoá trạng thái cho RL Upgr: [now] + cho từng DC: [total, busy, free, current_f, qlen_inf, qlen_trn]."""
-        feats = []
-        for dc in self.dcs.values():
-            total = float(getattr(dc, "total_gpus", dc.total_gpus))
-            busy = float(dc.busy_gpus)
-            free = max(0.0, total - busy)
-            cf = float(getattr(dc, "current_freq", self._f_min))
-            q_inf = float(len(dc.q_inf))
-            q_trn = float(len(dc.q_train))
-            feats.extend([total, busy, free, cf, q_inf, q_trn])
-        now = float(self.now)
-        return np.asarray([now] + feats, dtype=np.float32)
-
-    def _upgr_masks(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Mask cho DC (có GPU rảnh) và cho #GPU (1..N) theo free tối đa trên mọi DC."""
-        dc_mask = []
-        max_free = 0
-        for dc in self.dcs.values():
-            total = int(getattr(dc, "total_gpus", dc.total_gpus))
-            free = max(0, total - int(dc.busy_gpus))
-            dc_mask.append(free > 0)
-            max_free = max(max_free, free)
-
-        n_choices = self._n_g_choices
-        g_mask = [(i + 1) <= max_free for i in range(n_choices)]
-
-        # --- chọn buffer phù hợp với workload hiện tại ---
-        buf = None
-        if hasattr(self, "_lat_hist"):
-            # nếu có training thì ưu tiên training; nếu không có thì dùng inference
-            buf = self._lat_hist.get("training") or self._lat_hist.get("inference")
-
-        if buf and len(buf) >= 5 and hasattr(self, "rl_upgr"):
-            p99_recent_ms = float(np.percentile(buf, 99) * 1000.0)
-            target = self.rl_upgr.cmdp.constraints["latency_p99"].target
-            # chỉ thu nhỏ #GPU khi hệ đang "dư" SLO rõ rệt
-            if p99_recent_ms < 0.9 * target:
-                cap = 1  # ưu tiên ít GPU
-                g_mask = np.array([(i + 1) <= min(cap, max_free) for i in range(n_choices)], dtype=bool)
-
-        return np.asarray(dc_mask, bool), np.asarray(g_mask, bool)
 
     def _dc_idx_to_name(self, idx: int) -> str:
         return self._dc_names[int(idx)]
