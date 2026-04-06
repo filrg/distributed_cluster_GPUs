@@ -6,7 +6,7 @@ from simcore.models.job import Job, PreemptedJob, JobCompletionMetrics
 from simcore.workload.arrivals import ArrivalConfig, sample_job_size
 from simcore.policy import PolicyConfig, select_gpus_and_set_freq
 from simcore.models.gpu.latency_paper import step_time_s
-from simcore.policy_paper import energy_tuple, best_nf_grid, best_energy_freq
+from simcore.objective_search import energy_tuple, best_nf_grid, best_energy_freq
 from simcore.models.network import Ingress, Graph
 from simcore.router import RouterPolicy
 from simcore.models.gpu.energy_paper import task_power_w
@@ -341,8 +341,7 @@ class MultiIngressPaperSimulator:
         data_gb = 0.05 if job.jtype == 'inference' else 5.0
         if bottleneck and bottleneck > 0.0:
             xfer_s = data_gb / bottleneck
-        else:
-            # Graph trả về 0.0 nếu bottleneck là vô cực -> coi như không tính phần băng thông
+        else: # Graph trả về 0.0 nếu bottleneck là vô cực
             xfer_s = 0.0
         transfer_s = Lnet_s + xfer_s
         return Lnet_s, path, bottleneck, cost_sum, transfer_s

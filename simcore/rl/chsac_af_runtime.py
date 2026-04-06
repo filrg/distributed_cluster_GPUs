@@ -4,7 +4,7 @@ from typing import Any, List, Optional, Tuple
 
 from simcore.models.datacenter.datacenter import DataCenter
 from simcore.models.job import Job, PreemptedJob, JobCompletionMetrics
-from simcore.policy_paper import best_energy_freq
+from simcore.objective_search import best_energy_freq
 from simcore.rl.chsac_af import CHSAC_AF
 from simcore.rl.replay import ReplayBuffer, Transition
 
