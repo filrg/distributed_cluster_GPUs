@@ -3,8 +3,8 @@ import torch
 from typing import Any, List, Optional, Tuple
 
 from simcore.models.datacenter.datacenter import DataCenter
-from simcore.models.job import Job, PreemptedJob
-from ..policy_paper import best_energy_freq
+from simcore.models.job import Job, PreemptedJob, JobCompletionMetrics
+from simcore.policy_paper import best_energy_freq
 from simcore.rl.chsac_af import CHSAC_AF
 from simcore.rl.replay import ReplayBuffer, Transition
 
@@ -21,8 +21,8 @@ class ChsacAFRuntime:
         upgr_buffer: int,
     ):
         self.sim = simulator
-        self._n_g_choices = int(self.sim.policy.max_gpus_per_job)
 
+        self._n_g_choices = int(self.sim.policy.max_gpus_per_job)
         f_all = [f for dc in self.sim.dcs.values() for f in getattr(dc, "freq_levels", [])]
         self._f_min = min(f_all) if f_all else 1.0
         self._obs_dim = self.obs().shape[0]
@@ -36,7 +36,7 @@ class ChsacAFRuntime:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         self.rl_upgr = CHSAC_AF(
             obs_dim=self._obs_dim,
-            n_dc=len(self.sim._dc_names),
+            n_dc=len(self.sim.dc_names),
             n_g_choices=self._n_g_choices,
             constraints=constraints,
             device=device,
@@ -120,7 +120,7 @@ class ChsacAFRuntime:
 
         n_sel = max(1, min(self.sim._gidx_to_n(int(action["g"])), dc_tgt.free_gpus, self.sim.policy.max_gpus_per_job))
         pC, tC = self.sim.coeffs_map[(dc_tgt.name, job.jtype)]
-        levels = sorted(dc_tgt.freq_levels)
+        levels = sorted(dc_tgt.freq_levels) if dc_tgt.freq_levels else [getattr(dc_tgt, "current_freq", 1.0)]
         f_opt = best_energy_freq(n_sel, levels, pC, tC)
         f_sel = self.sim._guard_freq_by_deadline(job, n_sel, levels, tC, f_opt)
 
@@ -140,11 +140,11 @@ class ChsacAFRuntime:
             f_rl = self.sim._guard_freq_by_deadline(job, n_rl, levels, tC, f_rl)
             self.sim._resume_preempted_job(dc, preempted_job, n_rl, f_rl)
 
-    def on_job_finish(self, dc: DataCenter, job: Job, g: int, f_used: float, rl_metrics: dict):
+    def on_job_finish(self, dc: DataCenter, job: Job, g: int, f_used: float, rl_metrics: JobCompletionMetrics):
         if not (hasattr(job, "_upgr_action") and hasattr(job, "_upgr_state0")):
             return
 
-        e_unit_kwh = float(rl_metrics["energy_kwh"]) / (float(rl_metrics["units_processed"]) + 1e-9)
+        e_unit_kwh = float(rl_metrics.energy_kwh) / (float(rl_metrics.units_processed) + 1e-9)
         n = max(1, int(job._upgr_action["n"]))
         alpha_n = 0.05
         gpu_pref = alpha_n * (1.0 / n)
@@ -155,8 +155,8 @@ class ChsacAFRuntime:
         gpu_over = max(0, g - n_min)
 
         costs = {
-            "latency_p99": float(rl_metrics["p99_latency_ms"]),
-            "power": float(rl_metrics["power_W"]),
+            "latency_p99": float(rl_metrics.p99_latency_ms),
+            "power": float(rl_metrics.power_W),
             "gpu_over": float(gpu_over),
         }
 

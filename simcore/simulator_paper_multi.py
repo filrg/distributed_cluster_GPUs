@@ -2,13 +2,13 @@ import csv, heapq, itertools, random, os, numpy as np
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Union
 from simcore.models.datacenter.datacenter import DataCenter
-from simcore.models.job import Job, PreemptedJob
+from simcore.models.job import Job, PreemptedJob, JobCompletionMetrics
 from simcore.workload.arrivals import ArrivalConfig, sample_job_size
-from .policy import PolicyConfig, select_gpus_and_set_freq
+from simcore.policy import PolicyConfig, select_gpus_and_set_freq
 from simcore.models.gpu.latency_paper import step_time_s
-from .policy_paper import energy_tuple, best_nf_grid, best_energy_freq
+from simcore.policy_paper import energy_tuple, best_nf_grid, best_energy_freq
 from simcore.models.network import Ingress, Graph
-from .router import RouterPolicy
+from simcore.router import RouterPolicy
 from simcore.models.gpu.energy_paper import task_power_w
 from simcore.algo.UCB1 import BanditDVFS
 from simcore.algo.power_cap import run_power_cap_control
@@ -69,6 +69,7 @@ class MultiIngressPaperSimulator:
         self.seq = itertools.count()
         self.ingresses = ingresses
         self.dcs = dcs
+        self.dc_names: List[str] = list(self.dcs.keys())
         self.graph = graph
         self.arr_inf = arrival_inf
         self.arr_trn = arrival_train
@@ -95,17 +96,13 @@ class MultiIngressPaperSimulator:
 
         self.power_cap = power_cap
         self.energy_budget_j = energy_budget_j
-        self.control_interval = control_interval
+        self.control_interval = control_interval # not being used
         self.bandit = BanditDVFS(init_explore=1, objective="energy") if algo == "bandit" else None
 
         # CHSAC-AF runtime
         self._chsac_runtime = None
         self.rl_upgr = None
         if self.algo == "chsac_af":
-            self._dc_names: List[str] = list(self.dcs.keys())
-            self._n_g_choices = int(self.policy.max_gpus_per_job)
-            f_all = [f for dc in self.dcs.values() for f in getattr(dc, "freq_levels", [])]
-            self._f_min = min(f_all) if f_all else 1.0
             self._chsac_runtime = ChsacAFRuntime(
                 simulator=self,
                 sla_p99_ms=sla_p99_ms,
@@ -566,46 +563,10 @@ class MultiIngressPaperSimulator:
         f_used = getattr(job, "f_used", dc.current_freq)
         T_pred, P_pred, E_pred = energy_tuple(g, f_used, p_coeffs, t_coeffs)  # per-unit
 
-        # ====== Chuẩn bị metrics cho RL (energy/latency/tail/power/...)
-        # Giả định E_pred là năng lượng (Joule) mỗi "unit" → đổi sang kWh
-        J_TO_KWH = 1.0 / 3.6e6
-        units_done = float(job.size)
-        E_job_kwh = float(E_pred) * units_done * J_TO_KWH
+        rl_metrics = self._build_job_completion_metrics(dc, job, g, f_used)
+        self.logger.debug(vars(rl_metrics))
 
-        # Sojourn time của job (s) → ms
-        sojourn_s = max(0.0, job.finish_time - job.start_time)
-        sojourn_ms = 1000.0 * sojourn_s
-
-        # Theo dõi tail latency (P99) bằng cửa sổ trượt
-        if not hasattr(self, "_lat_hist"):
-            self._lat_hist = {"inference": [], "training": []}
-        buf = self._lat_hist.setdefault(job.jtype, [])
-        buf.append(sojourn_s)
-        # Giữ ~2k mẫu gần nhất
-        if len(buf) > 2048:
-            del buf[: len(buf) - 2048]
-        mean_ms = (sum(buf) / len(buf)) * 1000.0 if buf else sojourn_ms
-        p99_ms = float(np.percentile(buf, 99) * 1000.0) if len(buf) >= 5 else sojourn_ms
-
-        # Công suất hiện tại (xấp xỉ trung bình trong step) và số lần chuyển trạng thái nguồn
-        if self.power_cap > 0:
-            P_now = self._estimate_dc_power(dc, getattr(dc, "current_freq", 1.0))
-        else:
-            P_now = self._estimate_dc_power(dc, getattr(dc, "current_freq", 1.0))
-        power_state_changes = int(getattr(self, "_power_state_changes_step", 0))
-
-        # Metrics đưa cho agent (agent sẽ tự tính reward theo mode)
-        rl_metrics = {
-            "energy_kwh": E_job_kwh,
-            "units_processed": units_done,
-            "mean_latency_ms": mean_ms,
-            "p99_latency_ms": p99_ms,
-            "power_W": float(P_now),
-            "power_state_changes": power_state_changes,
-        }
-        self.logger.debug({k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in rl_metrics.items()})
-
-        # === Update RL Upgr ===
+        # Update RL Upgr
         if self._chsac_runtime is not None:
             self._chsac_runtime.on_job_finish(dc, job, g, f_used, rl_metrics)
 
@@ -625,7 +586,7 @@ class MultiIngressPaperSimulator:
         if getattr(self, "bandit", None) is not None:
             self.bandit.update(dc.name, job.jtype, f_used, E_pred)
 
-        # Elastic scaling - after a job completion (giữ nguyên)
+        # Elastic scaling - after a job completion
         preempted_jobs = None
         if self.elastic_scaling:
             should_reallocate = self._should_reallocation(dc, job.jtype)
@@ -635,7 +596,7 @@ class MultiIngressPaperSimulator:
             if preempted_jobs:
                 self._rl_reallocate_training_jobs(dc, preempted_jobs)
 
-        # start next jobs (inference first) (giữ nguyên)
+        # start next jobs (inference first)
         while dc.free_gpus > 0:
             nxt = None
             if self.policy.inf_priority and dc.q_inf:
@@ -679,6 +640,40 @@ class MultiIngressPaperSimulator:
                             f"{power_now:.2f}", f"{dc.energy_joules / 1000.0:.4f}"])
         self._schedule(self.now + interval, 'log', {'interval': interval})
 
+    def _build_job_completion_metrics(self, dc: DataCenter, job: Job, g: int, f_used: float) -> JobCompletionMetrics:
+        _, _, e_pred = energy_tuple(g, f_used, *self.coeffs_map[(dc.name, job.jtype)])
+
+        j_to_kwh = 1.0 / 3.6e6
+        units_done = float(job.size)
+        e_job_kwh = float(e_pred) * units_done * j_to_kwh
+
+        sojourn_s = max(0.0, job.finish_time - job.start_time)
+        sojourn_ms = 1000.0 * sojourn_s
+
+        if not hasattr(self, "_lat_hist"):
+            self._lat_hist = {"inference": [], "training": []}
+
+        buf = self._lat_hist.setdefault(job.jtype, [])
+        buf.append(sojourn_s)
+
+        if len(buf) > 2048:
+            del buf[: len(buf) - 2048]
+
+        mean_ms = (sum(buf) / len(buf)) * 1000.0 if buf else sojourn_ms
+        p99_ms = float(np.percentile(buf, 99) * 1000.0) if len(buf) >= 5 else sojourn_ms
+
+        p_now = self._estimate_dc_power(dc, getattr(dc, "current_freq", 1.0))
+        power_state_changes = int(getattr(self, "_power_state_changes_step", 0))
+
+        return JobCompletionMetrics(
+            energy_kwh=e_job_kwh,
+            units_processed=units_done,
+            mean_latency_ms=mean_ms,
+            p99_latency_ms=p99_ms,
+            power_W=float(p_now),
+            power_state_changes=power_state_changes,
+        )
+
     def _log_accumulate_job_unit(self, dc: DataCenter, job: Job, accumulate_time: float):
         """Accumulate job_size = 1 / T(n,f) x time"""
         _, tC = self.coeffs_map[(dc.name, job.jtype)]
@@ -702,7 +697,7 @@ class MultiIngressPaperSimulator:
 
         # Carbon / price lấy từ state đã có
         CI = self.carbon.get(dc.name, 0.0)
-        price = self._price_kwh_at(dc.name) if hasattr(self, "_price_kwh") else 0.0
+        price = self._price_kwh_at(dc.name) if hasattr(self, "_price_kwh_at") else 0.0
 
         # chọn (n,f) tốt nhất cho mục tiêu
         if obj == "energy":
@@ -748,7 +743,7 @@ class MultiIngressPaperSimulator:
         return 0.0
 
     def _dc_idx_to_name(self, idx: int) -> str:
-        return self._dc_names[int(idx)]
+        return self.dc_names[int(idx)]
 
     def _gidx_to_n(self, g_idx: int) -> int:
         """Map index 0..(N-1) -> số GPU 1..N"""

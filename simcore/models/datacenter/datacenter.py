@@ -1,8 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Callable
 
-from ..gpu.gpu import GPUType
-from ..job import Job, PreemptedJob
+from simcore.models.gpu.gpu import GPUType
+from simcore.models.job import Job, PreemptedJob
 
 
 @dataclass

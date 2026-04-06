@@ -32,3 +32,13 @@ class PreemptedJob:
     preempt_time: float
     reason: str
     preempt_ckpt: dict # units_done, f_used, gpus_assigned
+
+
+@dataclass
+class JobCompletionMetrics:
+    energy_kwh: float
+    units_processed: float
+    mean_latency_ms: float
+    p99_latency_ms: float
+    power_W: float
+    power_state_changes: int
